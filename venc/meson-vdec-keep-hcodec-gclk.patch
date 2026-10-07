@@ -1,0 +1,13 @@
+diff --git a/drivers/staging/media/meson/vdec/vdec_1.c b/drivers/staging/media/meson/vdec/vdec_1.c
+index a65cb495..1a8f2ec7 100644
+--- a/drivers/staging/media/meson/vdec/vdec_1.c
++++ b/drivers/staging/media/meson/vdec/vdec_1.c
+@@ -198,7 +198,7 @@ static int vdec_1_start(struct amvdec_session *sess)
+ 	amvdec_write_dos(core, DOS_SW_RESET0, 0xfffffffc);
+ 	amvdec_write_dos(core, DOS_SW_RESET0, 0x00000000);
+ 
+-	amvdec_write_dos(core, DOS_GCLK_EN0, 0x3ff);
++	amvdec_write_dos_bits(core, DOS_GCLK_EN0, 0x3ff);	/* keep HCodec gates [26:12] */
+ 
+ 	/* enable VDEC Memories */
+ 	amvdec_write_dos(core, DOS_MEM_PD_VDEC, 0);
