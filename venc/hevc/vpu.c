@@ -39,21 +39,11 @@
 #include <linux/compat.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/of_address.h>
-#include <linux/amlogic/media/codec_mm/codec_mm.h>
-#include <linux/amlogic/cpu_version.h>
 #include <linux/version.h>
-#include "../../../frame_provider/decoder/utils/vdec_power_ctrl.h"
-#include <linux/amlogic/media/utils/vdec_reg.h>
-#include <linux/amlogic/power_ctrl.h>
-#include <dt-bindings/power/sc2-pd.h>
-#include <linux/amlogic/pwr_ctrl.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,11,1)
 #include <linux/sched/signal.h>
-#endif
+#include <linux/vmalloc.h>
 
-#include <linux/amlogic/media/utils/vdec_reg.h>
-#include "../../../common/media_clock/switch/amports_gate.h"
-
+#include "compat.h"
 #include "vpu.h"
 #include "vmm.h"
 
@@ -116,7 +106,7 @@ static s32 s_interrupt_flag;
 static wait_queue_head_t s_interrupt_wait_q;
 
 static spinlock_t s_vpu_lock = __SPIN_LOCK_UNLOCKED(s_vpu_lock);
-static DEFINE_SEMAPHORE(s_vpu_sem);
+static DEFINE_SEMAPHORE(s_vpu_sem, 1);
 static struct list_head s_vbp_head = LIST_HEAD_INIT(s_vbp_head);
 static struct list_head s_inst_list_head = LIST_HEAD_INIT(s_inst_list_head);
 static struct tasklet_struct hevc_tasklet;
@@ -531,8 +521,13 @@ static s32 vpu_open(struct inode *inode, struct file *filp)
 		if (get_cpu_type() >= MESON_CPU_MAJOR_ID_SC2) {
 			pr_err("consider using reset control\n");
 		} else {
-			WRITE_MPEG_REG(RESET0_REGISTER, data32 & ~(1<<21));
-			WRITE_MPEG_REG(RESET0_REGISTER, data32 | (1<<21));
+			/*
+			 * hk1: RESET0 is write-1-to-pulse; the vendor value
+			 * also carried DOS_SW_RESET4 bits, which could pulse
+			 * unrelated blocks (bit 2 = the whole DOS). Only
+			 * bit 21 (DOS_CAPB3) is meant here.
+			 */
+			WRITE_MPEG_REG(RESET0_REGISTER, BIT(21));
 			READ_MPEG_REG(RESET0_REGISTER);
 			READ_MPEG_REG(RESET0_REGISTER);
 			READ_MPEG_REG(RESET0_REGISTER);
@@ -1596,7 +1591,7 @@ static s32 vpu_map_to_register(struct file *fp, struct vm_area_struct *vm)
 {
 	ulong pfn;
 
-	vm->vm_flags |= VM_IO | VM_RESERVED;
+	vm_flags_set(vm, VM_IO | VM_RESERVED);
 	vm->vm_page_prot =
 		pgprot_noncached(vm->vm_page_prot);
 	pfn = s_vpu_register.phys_addr >> PAGE_SHIFT;
@@ -1608,7 +1603,7 @@ static s32 vpu_map_to_register(struct file *fp, struct vm_area_struct *vm)
 static s32 vpu_map_to_physical_memory(
 	struct file *fp, struct vm_area_struct *vm)
 {
-	vm->vm_flags |= VM_IO | VM_RESERVED;
+	vm_flags_set(vm, VM_IO | VM_RESERVED);
 	if (vm->vm_pgoff ==
 		(s_common_memory.phys_addr >> PAGE_SHIFT)) {
 		vm->vm_page_prot =
@@ -1636,7 +1631,7 @@ static s32 vpu_map_to_instance_pool_memory(
 	s8 *vmalloc_area_ptr = (s8 *)s_instance_pool.base;
 	ulong pfn;
 
-	vm->vm_flags |= VM_RESERVED;
+	vm_flags_set(vm, VM_RESERVED);
 
 	/* loop over all pages, map it page individually */
 	while (length > 0) {
@@ -1701,7 +1696,7 @@ static int vpu_dma_buffer_map(struct vpu_dma_cfg *cfg)
 		goto attach_err;
 	}
 
-	sg = dma_buf_map_attachment(d_att, dir);
+	sg = dma_buf_map_attachment_unlocked(d_att, dir);
 	if (sg == NULL) {
 		enc_pr(LOG_ERROR, "failed to get dma sg\n");
 		goto map_attach_err;
@@ -1745,7 +1740,7 @@ static void vpu_dma_buffer_unmap(struct vpu_dma_cfg *cfg)
 	d_att = cfg->attach;
 	sg = cfg->sg;
 
-	dma_buf_unmap_attachment(d_att, sg, dir);
+	dma_buf_unmap_attachment_unlocked(d_att, sg, dir);
 	dma_buf_detach(dbuf, d_att);
 	dma_buf_put(dbuf);
 
@@ -1872,8 +1867,8 @@ static const struct file_operations vpu_fops = {
 	.mmap = vpu_mmap,
 };
 
-static ssize_t hevcenc_status_show(struct class *cla,
-				  struct class_attribute *attr, char *buf)
+static ssize_t hevcenc_status_show(const struct class *cla,
+				  const struct class_attribute *attr, char *buf)
 {
 	return snprintf(buf, 40, "hevcenc_status_show\n");
 }
@@ -1943,13 +1938,13 @@ s32 uninit_HevcEnc_device(void)
 	if (hevcenc_dev)
 		device_destroy(&hevcenc_class, MKDEV(s_vpu_major, 0));
 
-	class_destroy(&hevcenc_class);
+	class_unregister(&hevcenc_class);
 
 	unregister_chrdev(s_vpu_major, VPU_DEV_NAME);
 	return 0;
 }
 
-static s32 hevc_mem_device_init(
+static s32 __maybe_unused hevc_mem_device_init(
 	struct reserved_mem *rmem, struct device *dev)
 {
 	s32 r;
@@ -2085,7 +2080,7 @@ static s32 vpu_probe(struct platform_device *pdev)
 		if (res.start != 0) {
 			s_vpu_register.phys_addr = res.start;
 			s_vpu_register.virt_addr =
-				(ulong)ioremap_nocache(
+				(ulong)ioremap(
 				res.start, resource_size(&res));
 			s_vpu_register.size = res.end - res.start;
 			enc_pr(LOG_DEBUG,
@@ -2097,7 +2092,7 @@ static s32 vpu_probe(struct platform_device *pdev)
 		} else {
 			s_vpu_register.phys_addr = VPU_REG_BASE_ADDR;
 			s_vpu_register.virt_addr =
-				(ulong)ioremap_nocache(
+				(ulong)ioremap(
 				s_vpu_register.phys_addr, VPU_REG_SIZE);
 			s_vpu_register.size = VPU_REG_SIZE;
 			enc_pr(LOG_DEBUG,
@@ -2108,6 +2103,17 @@ static s32 vpu_probe(struct platform_device *pdev)
 				s_vpu_register.virt_addr);
 		}
 		reg_count++;
+	}
+	if (!reg_count) {
+		/*
+		 * hk1: no DT node on mainline. Vendor DT: io_reg_base
+		 * <0xff610000 0x4000>; keep size = end - start like the DT path,
+		 * userspace maps it with length size + 1.
+		 */
+		s_vpu_register.phys_addr = 0xff610000;
+		s_vpu_register.virt_addr =
+			(ulong)ioremap(s_vpu_register.phys_addr, 0x4000);
+		s_vpu_register.size = 0x4000 - 1;
 	}
 
 	/* get the major number of the character device */
@@ -2173,7 +2179,7 @@ ERROR_PROVE_DEVICE:
 	return err;
 }
 
-static s32 vpu_remove(struct platform_device *pdev)
+static void vpu_remove(struct platform_device *pdev)
 {
 	enc_pr(LOG_DEBUG, "vpu_remove\n");
 
@@ -2221,7 +2227,7 @@ static s32 vpu_remove(struct platform_device *pdev)
 	if (get_cpu_type() >= MESON_CPU_MAJOR_ID_SC2)
 		vpu_clk_unprepare(&pdev->dev, &s_vpu_clks);
 	uninit_HevcEnc_device();
-	return 0;
+	return;
 }
 
 #ifdef CONFIG_PM
@@ -2422,7 +2428,13 @@ static s32 __init vpu_init(void)
 		}
 	}
 
+	/* hk1: no DT node on mainline, create the device ourselves */
+	res = henc_hw_init();
+	if (res)
+		return res;
 	res = platform_driver_register(&vpu_driver);
+	if (res)
+		henc_hw_exit();
 	enc_pr(LOG_INFO,
 		"end vpu_init result=0x%x\n", res);
 	return res;
@@ -2442,17 +2454,7 @@ static void __exit vpu_exit(void)
 		return;
 	}
 	platform_driver_unregister(&vpu_driver);
-}
-
-static const struct reserved_mem_ops rmem_hevc_ops = {
-	.device_init = hevc_mem_device_init,
-};
-
-static s32 __init hevc_mem_setup(struct reserved_mem *rmem)
-{
-	rmem->ops = &rmem_hevc_ops;
-	enc_pr(LOG_DEBUG, "HevcEnc reserved mem setup.\n");
-	return 0;
+	henc_hw_exit();
 }
 
 module_param(print_level, uint, 0664);
@@ -2476,4 +2478,3 @@ MODULE_LICENSE("GPL");
 
 module_init(vpu_init);
 module_exit(vpu_exit);
-RESERVEDMEM_OF_DECLARE(amlogic, "amlogic, HevcEnc-memory", hevc_mem_setup);
