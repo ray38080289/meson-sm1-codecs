@@ -10,6 +10,7 @@
 #include "vdec_1.h"
 #include "vdec_hevc.h"
 #include "codec_mpeg12.h"
+#include "codec_mpeg12_multi.h"
 #include "codec_h264.h"
 #include "codec_h264_g12a.h"
 #include "codec_hevc.h"
@@ -294,24 +295,24 @@ static const struct amvdec_format vdec_formats_sm1[] = {
 	}, {
 		.pixfmt = V4L2_PIX_FMT_MPEG1,
 		.min_buffers = 8,
-		.max_buffers = 8,
+		.max_buffers = 16,
 		.max_width = 1920,
 		.max_height = 1080,
 		.vdec_ops = &vdec_1_ops,
-		.codec_ops = &codec_mpeg12_ops,
-		.firmware_path = "meson/vdec/gxl_mpeg12.bin",
-		.pixfmts_cap = { V4L2_PIX_FMT_NV12M, V4L2_PIX_FMT_YUV420M, 0 },
+		.codec_ops = &codec_mpeg12_multi_ops,
+		.firmware_path = "meson/vdec/sm1_mpeg12_multi.bin",
+		.pixfmts_cap = { V4L2_PIX_FMT_NV12M, 0 },
 		.flags = V4L2_FMT_FLAG_COMPRESSED,
 	}, {
 		.pixfmt = V4L2_PIX_FMT_MPEG2,
 		.min_buffers = 8,
-		.max_buffers = 8,
+		.max_buffers = 16,
 		.max_width = 1920,
 		.max_height = 1080,
 		.vdec_ops = &vdec_1_ops,
-		.codec_ops = &codec_mpeg12_ops,
-		.firmware_path = "meson/vdec/gxl_mpeg12.bin",
-		.pixfmts_cap = { V4L2_PIX_FMT_NV12M, V4L2_PIX_FMT_YUV420M, 0 },
+		.codec_ops = &codec_mpeg12_multi_ops,
+		.firmware_path = "meson/vdec/sm1_mpeg12_multi.bin",
+		.pixfmts_cap = { V4L2_PIX_FMT_NV12M, 0 },
 		.flags = V4L2_FMT_FLAG_COMPRESSED,
 	},
 };
