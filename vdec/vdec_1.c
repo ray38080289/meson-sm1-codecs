@@ -378,7 +378,7 @@ static int vdec_1_resume(struct amvdec_session *sess, bool reload_firmware)
 	amvdec_write_dos(core, DOS_SW_RESET0, 0x00000000);
 	amvdec_read_dos(core, DOS_SW_RESET0);
 
-	amvdec_write_dos(core, DOS_GCLK_EN0, 0x3ff);
+	amvdec_write_dos_bits(core, DOS_GCLK_EN0, 0x3ff);	/* keep HCodec gates [26:12] */
 
 	/* Reset DOS top registers */
 	amvdec_write_dos(core, DOS_VDEC_MCRCC_STALL_CTRL, 0);
