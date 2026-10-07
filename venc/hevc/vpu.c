@@ -46,7 +46,7 @@
 #include "compat.h"
 
 #define HENC_STEP(what) \
-	pr_warn("HevcEnc: %s: sleep0=%#x iso0=%#x clk=%#x clk2=%#x memPd=%#x\n", \
+	pr_debug("HevcEnc: %s: sleep0=%#x iso0=%#x clk=%#x clk2=%#x memPd=%#x\n", \
 		 what, READ_AOREG(AO_RTI_GEN_PWR_SLEEP0), \
 		 READ_AOREG(AO_RTI_GEN_PWR_ISO0), \
 		 READ_HHI_REG(HHI_WAVE420L_CLK_CNTL), \
@@ -389,7 +389,7 @@ static irqreturn_t vpu_irq_handler(s32 irq, void *dev_id)
 		static unsigned int hk1_irqs;
 
 		if (hk1_irqs++ < 5)
-			pr_warn("HevcEnc: irq #%u\n", hk1_irqs);
+			pr_debug("HevcEnc: irq #%u\n", hk1_irqs);
 	}
 
 	for (core = 0; core < MAX_NUM_VPU_CORE; core++) {
@@ -570,7 +570,7 @@ static s32 vpu_open(struct inode *inode, struct file *filp)
 				? ~0x8 : ~(0x3<<12)));
 		}
 		HENC_STEP("open: iso0 cleared");
-		pr_warn("HevcEnc: product number %#x (expect 0x4201)\n",
+		pr_debug("HevcEnc: product number %#x (expect 0x4201)\n",
 			 readl((void __iomem *)s_vpu_register.virt_addr + 0x1044));
 		spin_unlock_irqrestore(&s_vpu_lock, flags);
 	}
