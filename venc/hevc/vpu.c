@@ -1624,15 +1624,20 @@ static s32 vpu_map_to_register(struct file *fp, struct vm_area_struct *vm)
 static s32 vpu_map_to_physical_memory(
 	struct file *fp, struct vm_area_struct *vm)
 {
+	/*
+	 * hk1: RAM must not be Device memory on arm64: glibc memset/memcpy use
+	 * DC ZVA and unaligned accesses, which fault (SIGBUS) on Device mappings.
+	 * Normal non-cacheable (write-combine) keeps the CPU view uncached.
+	 */
 	vm_flags_set(vm, VM_IO | VM_RESERVED);
 	if (vm->vm_pgoff ==
 		(s_common_memory.phys_addr >> PAGE_SHIFT)) {
 		vm->vm_page_prot =
-			pgprot_noncached(vm->vm_page_prot);
+			pgprot_writecombine(vm->vm_page_prot);
 	} else {
 		if (vpu_is_buffer_cached(fp, vm->vm_pgoff) == 0)
 			vm->vm_page_prot =
-				pgprot_noncached(vm->vm_page_prot);
+				pgprot_writecombine(vm->vm_page_prot);
 	}
 	/* vm->vm_page_prot = pgprot_writecombine(vm->vm_page_prot); */
 	if (!pfn_valid(vm->vm_pgoff)) {
