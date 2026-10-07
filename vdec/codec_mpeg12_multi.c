@@ -81,6 +81,8 @@ struct codec_mpeg12m {
 
 	int refs[2];			/* [0] older, [1] newer; -1 = none */
 	u8 ref_use[MAX_BUFS];
+	/* per fw index, for output after reordering */
+	u32 pic_offset[MAX_BUFS], pic_field[MAX_BUFS], pic_type[MAX_BUFS];
 	int rec;			/* fw index being reconstructed */
 	unsigned int dec_num;
 
@@ -92,10 +94,12 @@ struct codec_mpeg12m {
 
 	bool swap_valid;		/* VLD state saved in the swap page */
 	u32 wrap_cookie;
+	struct delayed_work retry_work;	/* DATA_EMPTY: replay after a while */
 	bool waiting_buffer;		/* no free CAPTURE buffer for the next run */
 	bool waiting_data;		/* DATA_EMPTY: rerun once input arrives */
 	bool running;
 };
+
 
 static u32 mpeg12m_spec(struct amvdec_session *sess, int idx)
 {
@@ -266,6 +270,8 @@ static void mpeg12m_reset_core(struct codec_mpeg12m *m)
 		       m->dmc + DMC_REQ_CTRL);
 }
 
+#define PARSER_VIDEO_WP		0x88
+
 /* vdec_prepare_input() for a stream that already ran once */
 static void mpeg12m_swap_restore(struct codec_mpeg12m *m)
 {
@@ -283,6 +289,36 @@ static void mpeg12m_swap_restore(struct codec_mpeg12m *m)
 			   10, 100000);
 	amvdec_write_dos(core, VLD_MEM_SWAP_CTL, 0);
 	amvdec_write_dos(core, VLD_MEM_VIFIFO_WRAP_COUNT, m->wrap_cookie);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_CONTROL, (0x11 << 16) | BIT(10));
+	/* the swap page holds the WP of save time; the parser moved on */
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_WP,
+			 amvdec_read_parser(core, PARSER_VIDEO_WP));
+}
+
+/*
+ * vdec_prepare_input() before the first committed picture: the full reset
+ * wiped the VIFIFO, so program it from the FIFO start up to the parser's
+ * write pointer.
+ */
+static void mpeg12m_vififo_init(struct codec_mpeg12m *m)
+{
+	struct amvdec_session *sess = m->sess;
+	struct amvdec_core *core = sess->core;
+	u32 wp = amvdec_read_parser(core, PARSER_VIDEO_WP);
+
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_CONTROL, 0);
+	amvdec_write_dos(core, DOS_SW_RESET0, BIT(5) | BIT(4) | BIT(3));
+	amvdec_write_dos(core, DOS_SW_RESET0, 0);
+	amvdec_write_dos(core, POWER_CTL_VLD, BIT(4));
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_START_PTR, sess->vififo_paddr);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_END_PTR,
+			 sess->vififo_paddr + sess->vififo_size - 8);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_CURR_PTR, sess->vififo_paddr);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_CONTROL, 1);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_CONTROL, 0);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_BUF_CNTL, MEM_BUFCTRL_MANUAL);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_RP, sess->vififo_paddr);
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_WP, wp);
 	amvdec_write_dos(core, VLD_MEM_VIFIFO_CONTROL, (0x11 << 16) | BIT(10));
 }
 
@@ -321,6 +357,8 @@ static void mpeg12m_next_run(struct codec_mpeg12m *m, bool commit)
 	mpeg12m_reset_core(m);
 	if (m->swap_valid)
 		mpeg12m_swap_restore(m);
+	else
+		mpeg12m_vififo_init(m);
 
 	mpeg12m_program_picture(m);
 	amvdec_write_dos_bits(core, VLD_MEM_VIFIFO_CONTROL, BIT(2) | BIT(1));
@@ -340,8 +378,22 @@ static void mpeg12m_restart_work(struct work_struct *work)
 					       restart_work);
 
 	mutex_lock(&m->lock);
-	if (m->sess->status == STATUS_RUNNING && !m->waiting_data)
+	if (!m->waiting_data)
 		mpeg12m_next_run(m, true);
+	mutex_unlock(&m->lock);
+}
+
+/* DATA_EMPTY: replay the picture once more input may have arrived */
+static void mpeg12m_retry_work(struct work_struct *work)
+{
+	struct codec_mpeg12m *m = container_of(to_delayed_work(work),
+					       struct codec_mpeg12m, retry_work);
+
+	mutex_lock(&m->lock);
+	if (m->waiting_data) {
+		m->waiting_data = false;
+		mpeg12m_next_run(m, false);
+	}
 	mutex_unlock(&m->lock);
 }
 
@@ -357,6 +409,7 @@ static int codec_mpeg12m_start(struct amvdec_session *sess)
 	m->sess = sess;
 	mutex_init(&m->lock);
 	INIT_WORK(&m->restart_work, mpeg12m_restart_work);
+	INIT_DELAYED_WORK(&m->retry_work, mpeg12m_retry_work);
 	m->refs[0] = m->refs[1] = -1;
 
 	m->ws_vaddr = dma_alloc_coherent(core->dev, WORKSPACE_SIZE,
@@ -408,6 +461,7 @@ static int codec_mpeg12m_stop(struct amvdec_session *sess)
 	if (!m)
 		return 0;
 	cancel_work_sync(&m->restart_work);
+	cancel_delayed_work_sync(&m->retry_work);
 	if (m->dmc)
 		iounmap(m->dmc);
 	dma_free_coherent(core->dev, SWAP_SIZE, m->swap_vaddr, m->swap_paddr);
@@ -435,6 +489,12 @@ static void mpeg12m_update_dar(struct amvdec_session *sess, u32 seq)
 		sess->pixelaspect.denominator = 1;
 		break;
 	}
+}
+
+static void mpeg12m_output(struct codec_mpeg12m *m, int index)
+{
+	amvdec_dst_buf_done_idx(m->sess, index, m->pic_offset[index],
+				m->pic_field[index], m->pic_type[index]);
 }
 
 /* update_reference(): returns the fw index to output now, or -1 */
@@ -483,10 +543,26 @@ static irqreturn_t codec_mpeg12m_threaded_isr(struct amvdec_session *sess)
 	if (reg == BUFFEROUT_DATA_REQUEST)
 		goto unlock;		/* stream mode: the VIFIFO keeps filling */
 	if (reg == BUFFEROUT_DATA_EMPTY) {
-		/* replay this picture from the last committed state */
 		mpeg12m_stop_cpu(core);
 		m->running = false;
+		if (sess->should_stop) {
+			/*
+			 * EOS consumed: flush the held reference. Input that
+			 * held no picture (headers, the EOS itself) keeps
+			 * esparser_queued_bufs > 1, so that frame is not
+			 * flagged LAST: follow it with an empty one.
+			 */
+			if (m->refs[0] >= 0)
+				mpeg12m_output(m, m->refs[1]);
+			if (m->refs[0] < 0 ||
+			    atomic_read(&sess->esparser_queued_bufs) > 0)
+				amvdec_dst_buf_done_empty_last(sess);
+			m->refs[0] = m->refs[1] = -1;
+			goto unlock;
+		}
+		/* replay this picture from the last committed state */
 		m->waiting_data = true;
+		schedule_delayed_work(&m->retry_work, msecs_to_jiffies(10));
 		goto unlock;
 	}
 
@@ -514,6 +590,9 @@ static irqreturn_t codec_mpeg12m_threaded_isr(struct amvdec_session *sess)
 						     V4L2_FIELD_INTERLACED_BT;
 	mpeg12m_update_dar(sess, seq);
 
+	m->pic_offset[index] = offset;
+	m->pic_field[index] = field;
+	m->pic_type[index] = PICINFO_TYPE(info) + 1;	/* I=1 P=2 B=3 */
 	if (PICINFO_TYPE(info) != 2)		/* I or P */
 		out = mpeg12m_update_reference(m, index);
 	else					/* B: no forward ref yet -> drop */
@@ -521,7 +600,7 @@ static irqreturn_t codec_mpeg12m_threaded_isr(struct amvdec_session *sess)
 
 	mpeg12m_save_context(m, reg);
 	if (out >= 0)
-		amvdec_dst_buf_done_idx(sess, out, offset, field, 0);
+		mpeg12m_output(m, out);
 
 	schedule_work(&m->restart_work);
 unlock:
