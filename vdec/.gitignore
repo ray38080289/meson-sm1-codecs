@@ -1,0 +1,13 @@
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+.*.cmd
+modules.order
+Module.symvers
+*.orig
+*.c.stream
+*.c.prebitcnt
+patch_*.py
+fw/
