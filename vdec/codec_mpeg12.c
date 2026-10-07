@@ -10,6 +10,7 @@
 #include "codec_mpeg12.h"
 #include "dos_regs.h"
 #include "vdec_helpers.h"
+#include "vdec_platform.h"
 
 #define SIZE_WORKSPACE		SZ_128K
 /* Offset subtracted by the firmware from the workspace paddr */
@@ -64,6 +65,7 @@ static int codec_mpeg12_start(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
 	struct codec_mpeg12 *mpeg12;
+	unsigned int i;
 	int ret;
 
 	mpeg12 = kzalloc(sizeof(*mpeg12), GFP_KERNEL);
@@ -84,6 +86,17 @@ static int codec_mpeg12_start(struct amvdec_session *sess)
 					(u32[]){ 8, 0 });
 	if (ret)
 		goto free_workspace;
+
+	/*
+	 * G12A and later keep a per-canvas block-mode table for the motion
+	 * compensation fetch; left at its default the MC reads our linear
+	 * reference frames as 32x32 blocks (I-frames fine, P/B garbage).
+	 * Same programming as the H.264 multi decoder: linear, index write.
+	 */
+	if (core->platform->revision >= VDEC_REVISION_G12A)
+		for (i = 0; i < sess->canvas_num; i++)
+			amvdec_write_dos(core, VDEC_ASSIST_CANVAS_BLK32,
+					 BIT(11) | BIT(8) | sess->canvas_alloc[i]);
 
 	amvdec_write_dos(core, POWER_CTL_VLD, BIT(4));
 	amvdec_write_dos(core, MREG_CO_MV_START,
