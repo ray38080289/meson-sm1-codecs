@@ -85,6 +85,72 @@ static int henc_map_irq(void)
 	return irq ? irq : -EINVAL;
 }
 
+#define CLKID_FCLK_DIV3		3	/* dt-bindings/clock/g12a-clkc.h */
+#define CLKID_FCLK_DIV5		5
+
+static struct clk *henc_get_clkc_clk(struct device_node *clkc, u32 id)
+{
+	struct of_phandle_args args = {
+		.np = clkc,
+		.args_count = 1,
+		.args = { id },
+	};
+
+	return of_clk_get_from_provider(&args);
+}
+
+static void henc_put_fclks(void)
+{
+	if (!IS_ERR_OR_NULL(henc_hw.fclk_div5)) {
+		clk_disable_unprepare(henc_hw.fclk_div5);
+		clk_put(henc_hw.fclk_div5);
+	}
+	if (!IS_ERR_OR_NULL(henc_hw.fclk_div3)) {
+		clk_disable_unprepare(henc_hw.fclk_div3);
+		clk_put(henc_hw.fclk_div3);
+	}
+	henc_hw.fclk_div3 = henc_hw.fclk_div5 = NULL;
+}
+
+/* hold the WAVE420L mux sources on so clk_disable_unused() cannot gate them */
+static int henc_get_fclks(void)
+{
+	struct device_node *clkc;
+	int ret;
+
+	struct clk *div3, *div5;
+
+	clkc = of_find_compatible_node(NULL, NULL, "amlogic,sm1-clkc");
+	if (!clkc)
+		return -ENODEV;
+	div3 = henc_get_clkc_clk(clkc, CLKID_FCLK_DIV3);
+	div5 = henc_get_clkc_clk(clkc, CLKID_FCLK_DIV5);
+	of_node_put(clkc);
+	if (IS_ERR(div3) || IS_ERR(div5)) {
+		ret = -ENODEV;
+		goto put;
+	}
+	ret = clk_prepare_enable(div3);
+	if (ret)
+		goto put;
+	ret = clk_prepare_enable(div5);
+	if (ret) {
+		clk_disable_unprepare(div3);
+		goto put;
+	}
+	henc_hw.fclk_div3 = div3;
+	henc_hw.fclk_div5 = div5;
+	pr_info("HevcEnc: fclk_div3 %lu Hz, fclk_div5 %lu Hz held on\n",
+		clk_get_rate(div3), clk_get_rate(div5));
+	return 0;
+put:
+	if (!IS_ERR(div5))
+		clk_put(div5);
+	if (!IS_ERR(div3))
+		clk_put(div3);
+	return ret;
+}
+
 int henc_hw_init(void)
 {
 	struct device_node *np, *hhi;
@@ -110,6 +176,9 @@ int henc_hw_init(void)
 		ret = PTR_ERR(henc_hw.dos_clk);
 		goto out;
 	}
+	ret = henc_get_fclks();
+	if (ret)
+		goto unmap;
 	/* shared with meson_vdec / the reset driver, so map without claiming */
 	henc_hw.dos = ioremap(res.start, resource_size(&res));
 	henc_hw.reset = ioremap(CBUS_RESET_BASE, 0x100);
@@ -142,6 +211,7 @@ unmap:
 		iounmap(henc_hw.reset);
 	if (henc_hw.dos)
 		iounmap(henc_hw.dos);
+	henc_put_fclks();
 	clk_put(henc_hw.dos_clk);
 out:
 	of_node_put(np);
@@ -153,5 +223,6 @@ void henc_hw_exit(void)
 	platform_device_unregister(henc_hw.pdev);
 	iounmap(henc_hw.reset);
 	iounmap(henc_hw.dos);
+	henc_put_fclks();
 	clk_put(henc_hw.dos_clk);
 }

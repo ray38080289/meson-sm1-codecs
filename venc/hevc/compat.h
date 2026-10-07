@@ -19,6 +19,12 @@ struct henc_hw {
 	void __iomem *reset;	/* CBUS reset controller, RESET0 at +0x4 */
 	struct regmap *ao, *hhi;
 	struct clk *dos_clk;
+	/*
+	 * WAVE420L muxes source fclk_div3 (aclk) and fclk_div5 (bclk/cclk);
+	 * mainline has no other user of fclk_div5, so clk_disable_unused()
+	 * gates it and any access to the bclk/cclk register domain hangs.
+	 */
+	struct clk *fclk_div3, *fclk_div5;
 	struct platform_device *pdev;
 };
 extern struct henc_hw henc_hw;
