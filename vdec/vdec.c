@@ -1194,7 +1194,7 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 
 	dev_dbg(dev, "Received V4L2_DEC_CMD_STOP\n");
 
-	if (codec_ops->context_switching &&
+	if ((codec_ops->context_switching || codec_ops->async_drain) &&
 	    (v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx) ||
 	     atomic_read(&sess->esparser_queued_bufs) ||
 	     (codec_ops->async_drain &&

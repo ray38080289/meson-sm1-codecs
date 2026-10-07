@@ -21,6 +21,7 @@
 
 #include "codec_mpeg12_multi.h"
 #include "dos_regs.h"
+#include "esparser.h"
 #include "vdec_helpers.h"
 
 /* protocol registers */
@@ -98,6 +99,8 @@ struct codec_mpeg12m {
 	bool waiting_buffer;		/* no free CAPTURE buffer for the next run */
 	bool waiting_data;		/* DATA_EMPTY: rerun once input arrives */
 	bool running;
+	bool eos;			/* end code written after the last input */
+	unsigned int eos_empty;		/* DATA_EMPTY count since then */
 };
 
 
@@ -359,6 +362,12 @@ static void mpeg12m_next_run(struct codec_mpeg12m *m, bool commit)
 		mpeg12m_swap_restore(m);
 	else
 		mpeg12m_vififo_init(m);
+	/*
+	 * Back to parser-fed mode (vdec_1_conf_esparser): in MANUAL mode the
+	 * VLD WP stays put, so VIFIFO_LEVEL under-reports what the parser
+	 * wrote and the esparser overruns unread data once the FIFO wraps.
+	 */
+	amvdec_write_dos(core, VLD_MEM_VIFIFO_BUF_CNTL, 0);
 
 	mpeg12m_program_picture(m);
 	amvdec_write_dos_bits(core, VLD_MEM_VIFIFO_CONTROL, BIT(2) | BIT(1));
@@ -545,7 +554,11 @@ static irqreturn_t codec_mpeg12m_threaded_isr(struct amvdec_session *sess)
 	if (reg == BUFFEROUT_DATA_EMPTY) {
 		mpeg12m_stop_cpu(core);
 		m->running = false;
-		if (sess->should_stop) {
+		/*
+		 * The first DATA_EMPTY after the EOS write may predate it, so
+		 * replay once: the end code lets the last picture finish.
+		 */
+		if (READ_ONCE(m->eos) && m->eos_empty++) {
 			/*
 			 * EOS consumed: flush the held reference. Input that
 			 * held no picture (headers, the EOS itself) keeps
@@ -639,10 +652,16 @@ static void codec_mpeg12m_input_queued(struct amvdec_session *sess,
 
 static const u8 mpeg12m_eos_sequence[SZ_1K] = { 0x00, 0x00, 0x01, 0xB7 };
 
-static const u8 *codec_mpeg12m_eos_sequence(u32 *len)
+/* async_drain: runs once every OUTPUT buffer went through the parser */
+static void codec_mpeg12m_drain(struct amvdec_session *sess)
 {
-	*len = ARRAY_SIZE(mpeg12m_eos_sequence);
-	return mpeg12m_eos_sequence;
+	struct codec_mpeg12m *m = sess->priv;
+
+	if (!m)
+		return;
+	esparser_queue_eos(sess->core, mpeg12m_eos_sequence,
+			   sizeof(mpeg12m_eos_sequence));
+	WRITE_ONCE(m->eos, true);
 }
 
 struct amvdec_codec_ops codec_mpeg12_multi_ops = {
@@ -652,5 +671,6 @@ struct amvdec_codec_ops codec_mpeg12_multi_ops = {
 	.threaded_isr = codec_mpeg12m_threaded_isr,
 	.capture_queued = codec_mpeg12m_capture_queued,
 	.input_queued = codec_mpeg12m_input_queued,
-	.eos_sequence = codec_mpeg12m_eos_sequence,
+	.async_drain = true,
+	.drain = codec_mpeg12m_drain,
 };
