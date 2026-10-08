@@ -671,7 +671,14 @@ void amvdec_src_change(struct amvdec_session *sess, u32 width,
 
 	dev_dbg(sess->core->dev, "Res. changed (%ux%u), DPB %u, bitdepth %u\n",
 		width, height, dpb_size, bitdepth);
-	v4l2_event_queue_fh(&sess->fh, &amvdec_src_change_event);
+	/*
+	 * Decoding went on in the current CAPTURE queue: nothing for userspace
+	 * to reconfigure. An event here makes clients (GStreamer) STREAMOFF
+	 * CAPTURE, which powers the decoder off and drops the reference state
+	 * of codecs without context switching (VP9 lost its first keyframe).
+	 */
+	if (sess->status != STATUS_RUNNING)
+		v4l2_event_queue_fh(&sess->fh, &amvdec_src_change_event);
 }
 EXPORT_SYMBOL_GPL(amvdec_src_change);
 

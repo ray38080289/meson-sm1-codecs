@@ -188,7 +188,9 @@ struct amvdec_ops {
  * @drain: optional call if the codec has a custom way of draining
  * @resume: optional call to resume after a resolution change
  * @eos_sequence: optional call to get an end sequence to send to esparser
- *		  for flush. Mutually exclusive with @drain.
+ *		  for flush. Mutually exclusive with @drain, except for
+ *		  @async_drain codecs: it is queued after the last input,
+ *		  before @drain.
  * @isr: mandatory call when the ISR triggers
  * @threaded_isr: mandatory call for the threaded ISR
  */
@@ -297,6 +299,7 @@ enum amvdec_m2m_job_state {
  * @should_stop: flag set if userspace signaled EOS via command
  *		 or empty buffer
  * @draining: queued input is being drained before decoder stop
+ * @eos_drain: @drain runs for a decoder stop command (not a teardown)
  * @keyframe_found: flag set once a keyframe has been parsed
  * @num_dst_bufs: number of destination buffers
  * @changed_format: the format changed
@@ -359,6 +362,7 @@ struct amvdec_session {
 	unsigned int sequence_cap, sequence_out;
 	unsigned int should_stop;
 	unsigned int draining;
+	bool eos_drain;
 	unsigned int keyframe_found;
 	unsigned int num_dst_bufs;
 	unsigned int changed_format;

@@ -684,6 +684,31 @@ static void codec_vp9_flush_output(struct amvdec_session *sess)
 	mutex_unlock(&vp9->lock);
 }
 
+static void codec_vp9_drain(struct amvdec_session *sess)
+{
+	int q0 = atomic_read(&sess->esparser_queued_bufs);
+
+	codec_vp9_flush_output(sess);
+	if (!sess->eos_drain)
+		return;
+	/*
+	 * Decoder STOP: dst_buf_done() flags LAST on the output that drops the
+	 * queued count to 0. If none did, end with an empty LAST buffer.
+	 */
+	if (!(atomic_read(&sess->esparser_queued_bufs) < q0 &&
+	      atomic_read(&sess->esparser_queued_bufs) <= 0))
+		amvdec_dst_buf_done_empty_last(sess);
+}
+
+/* zeros push the tail of the last frame past the stream prefetch */
+static const u8 vp9_eos_pad[SZ_4K];
+
+static const u8 *codec_vp9_eos_sequence(u32 *len)
+{
+	*len = sizeof(vp9_eos_pad);
+	return vp9_eos_pad;
+}
+
 static u32 codec_vp9_num_pending_bufs(struct amvdec_session *sess)
 {
 	struct codec_vp9 *vp9 = sess->priv;
@@ -955,7 +980,11 @@ static void codec_vp9_set_sao(struct amvdec_session *sess,
 
 	val = amvdec_read_dos(core, HEVC_SAO_CTRL1) & ~0x3ff0;
 	val |= 0xff0; /* Set endianness for 2-bytes swaps (nv12) */
-	if (core->platform->revision < VDEC_REVISION_G12A) {
+	if (core->platform->revision >= VDEC_REVISION_G12A) {
+		/* linear output, 64-byte lines: bytesperline is ALIGN(w, 64) */
+		val &= ~(3 << 14);
+		val |= 2 << 14;
+	} else {
 		val &= ~0x3;
 		if (!codec_hevc_use_fbc(sess->pixfmt_cap, vp9->is_10bit))
 			val |= BIT(0); /* disable cm compression */
@@ -972,6 +1001,10 @@ static void codec_vp9_set_sao(struct amvdec_session *sess,
 	val = amvdec_read_dos(core, HEVCD_IPP_AXIIF_CONFIG) & ~0x30;
 	val |= 0xf;
 	val &= ~BIT(12); /* NV12 */
+	if (core->platform->revision >= VDEC_REVISION_G12A) {
+		val &= ~GENMASK(9, 8);
+		val |= 2 << 8;	/* 64-byte line alignment */
+	}
 	amvdec_write_dos(core, HEVCD_IPP_AXIIF_CONFIG, val);
 }
 
@@ -986,13 +1019,14 @@ static void codec_vp9_set_mpred_mv(struct amvdec_core *core,
 				   struct codec_vp9 *vp9)
 {
 	int mpred_mv_rd_end_addr;
-	int use_prev_frame_mvs = vp9->prev_frame->width ==
-					vp9->cur_frame->width &&
-				 vp9->prev_frame->height ==
-					vp9->cur_frame->height &&
-				 !vp9->prev_frame->intra_only &&
-				 vp9->prev_frame->show &&
-				 vp9->prev_frame->type != KEY_FRAME;
+	/* no previous picture (e.g. its decode failed): no MVs to borrow */
+	struct vp9_frame *prev = vp9->prev_frame ?: vp9->cur_frame;
+	int use_prev_frame_mvs = vp9->prev_frame &&
+				 prev->width == vp9->cur_frame->width &&
+				 prev->height == vp9->cur_frame->height &&
+				 !prev->intra_only &&
+				 prev->show &&
+				 prev->type != KEY_FRAME;
 
 	amvdec_write_dos(core, HEVC_MPRED_CTRL3, 0x24122412);
 	amvdec_write_dos(core, HEVC_MPRED_ABV_START_ADDR,
@@ -1008,12 +1042,12 @@ static void codec_vp9_set_mpred_mv(struct amvdec_core *core,
 			 codec_vp9_get_frame_mv_paddr(vp9, vp9->cur_frame));
 
 	amvdec_write_dos(core, HEVC_MPRED_MV_RD_START_ADDR,
-			 codec_vp9_get_frame_mv_paddr(vp9, vp9->prev_frame));
+			 codec_vp9_get_frame_mv_paddr(vp9, prev));
 	amvdec_write_dos(core, HEVC_MPRED_MV_RPTR,
-			 codec_vp9_get_frame_mv_paddr(vp9, vp9->prev_frame));
+			 codec_vp9_get_frame_mv_paddr(vp9, prev));
 
 	mpred_mv_rd_end_addr =
-			codec_vp9_get_frame_mv_paddr(vp9, vp9->prev_frame) +
+			codec_vp9_get_frame_mv_paddr(vp9, prev) +
 			(vp9->lcu_total * MV_MEM_UNIT);
 	amvdec_write_dos(core, HEVC_MPRED_MV_RD_END_ADDR, mpred_mv_rd_end_addr);
 }
@@ -1387,12 +1421,32 @@ static int codec_vp9_process_rpm(struct codec_vp9 *vp9)
 	union rpm_param *param = &vp9->rpm_param;
 	int src_changed = 0;
 	int is_10bit = 0;
-	int pic_width_64 = ALIGN(param->p.width, 64);
-	int pic_height_32 = ALIGN(param->p.height, 32);
-	int pic_width_lcu  = (pic_width_64 % LCU_SIZE) ?
+	int pic_width_64, pic_height_32, pic_width_lcu, pic_height_lcu;
+	int i;
+
+	/*
+	 * setup_frame_size_with_refs(): an inter frame may take its size
+	 * from a reference; the ucode then leaves width/height at 0.
+	 */
+	for (i = 0; i < REFS_PER_FRAME; ++i) {
+		int ref = (param->p.ref_info >>
+			   (((REFS_PER_FRAME - i - 1) * 4) + 1)) & 0x7;
+		struct vp9_frame *frame;
+
+		if (!((param->p.same_frame_size >> (REFS_PER_FRAME - i - 1)) & 1))
+			continue;
+		frame = codec_vp9_get_frame_by_idx(vp9, vp9->ref_frame_map[ref]);
+		param->p.width = frame ? frame->width : vp9->width;
+		param->p.height = frame ? frame->height : vp9->height;
+		break;
+	}
+
+	pic_width_64 = ALIGN(param->p.width, 64);
+	pic_height_32 = ALIGN(param->p.height, 32);
+	pic_width_lcu  = (pic_width_64 % LCU_SIZE) ?
 				pic_width_64 / LCU_SIZE  + 1
 				: pic_width_64 / LCU_SIZE;
-	int pic_height_lcu = (pic_height_32 % LCU_SIZE) ?
+	pic_height_lcu = (pic_height_32 % LCU_SIZE) ?
 				pic_height_32 / LCU_SIZE + 1
 				: pic_height_32 / LCU_SIZE;
 	vp9->lcu_total = pic_width_lcu * pic_height_lcu;
@@ -2181,6 +2235,8 @@ struct amvdec_codec_ops codec_vp9_ops = {
 	.isr = codec_vp9_isr,
 	.threaded_isr = codec_vp9_threaded_isr,
 	.num_pending_bufs = codec_vp9_num_pending_bufs,
-	.drain = codec_vp9_flush_output,
+	.async_drain = true,
+	.drain = codec_vp9_drain,
+	.eos_sequence = codec_vp9_eos_sequence,
 	.resume = codec_vp9_resume,
 };

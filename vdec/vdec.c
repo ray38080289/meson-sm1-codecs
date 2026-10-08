@@ -414,8 +414,19 @@ static bool vdec_m2m_finish_drain(struct amvdec_session *sess)
 		return false;
 
 	sess->should_stop = 1;
-	if (codec_ops->drain)
+	if (codec_ops->eos_sequence) {
+		u32 len;
+		const u8 *data = codec_ops->eos_sequence(&len);
+
+		/* push the last picture through, then let it decode */
+		esparser_queue_eos(sess->core, data, len);
+		vdec_wait_inactive(sess);
+	}
+	if (codec_ops->drain) {
+		sess->eos_drain = true;
 		codec_ops->drain(sess);
+		sess->eos_drain = false;
+	}
 	v4l2_m2m_mark_stopped(sess->m2m_ctx);
 
 	return true;
