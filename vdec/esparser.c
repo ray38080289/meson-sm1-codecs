@@ -364,13 +364,17 @@ esparser_queue_locked(struct amvdec_session *sess,
 	}
 
 	/*
-	 * Frame-based codecs stop at the end of each packet; the stream
-	 * prefetch reads past it, so keep 1 KiB of zeros behind the data
-	 * like the vendor VLD_PADDING_SIZE, or the tail never reaches the
-	 * decoder (HEVC: DECODE_BUFEMPTY short of HEVC_DECODE_SIZE).
+	 * The HEVC-core stream fetch reads ahead of the data. When a picture
+	 * is decoded before the next packet arrives (frame-based HEVC always,
+	 * VP9 when userspace feeds just in time), its tail is only covered by
+	 * whatever follows in the FIFO: keep 4 KiB of zeros behind each packet
+	 * (vendor VLD_PADDING_SIZE is 1 KiB; that was not enough here).
+	 * HEVC: DECODE_BUFEMPTY short of HEVC_DECODE_SIZE; VP9 under FFmpeg:
+	 * a random picture decoded from stale FIFO data.
 	 */
 	pad_size = esparser_pad_start_code(core, vb, payload_size,
-		sess->fmt_out->codec_ops->input_queued_buf ? SZ_4K : 0);
+		(sess->fmt_out->codec_ops->input_queued_buf ||
+		 sess->fmt_out->pixfmt == V4L2_PIX_FMT_VP9) ? SZ_4K : 0);
 	ret = esparser_write_data(core, phy, payload_size + pad_size);
 
 	if (ret <= 0) {

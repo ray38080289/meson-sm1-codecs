@@ -681,6 +681,9 @@ static void codec_vp9_flush_output(struct amvdec_session *sess)
 		list_del(&tmp->list);
 		kfree(tmp);
 	}
+	/* the frames are gone; do not leave dangling pointers to them */
+	vp9->prev_frame = NULL;
+	vp9->cur_frame = NULL;
 	mutex_unlock(&vp9->lock);
 }
 
