@@ -1307,8 +1307,11 @@ static void codec_vp9_process_frame(struct amvdec_session *sess)
 		codec_vp9_rm_noshow_frame(sess);
 
 	vp9->cur_frame = codec_vp9_get_new_frame(sess);
-	if (!vp9->cur_frame)
+	if (!vp9->cur_frame) {
+		dev_warn_ratelimited(core->dev,
+				     "VP9: no CAPTURE buffer, frame dropped\n");
 		return;
+	}
 
 	pr_debug("frame %d: type: %08X; show_exist: %u; show: %u, intra_only: %u\n",
 		 vp9->cur_frame->index,

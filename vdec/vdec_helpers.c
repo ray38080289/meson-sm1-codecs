@@ -390,6 +390,14 @@ unlock:
 }
 EXPORT_SYMBOL_GPL(amvdec_remove_ts);
 
+/* Queue V4L2_EVENT_EOS after the buffer flagged LAST was completed */
+static void amvdec_signal_eos(struct amvdec_session *sess)
+{
+	static const struct v4l2_event ev = { .type = V4L2_EVENT_EOS };
+
+	v4l2_event_queue_fh(&sess->fh, &ev);
+}
+
 static void dst_buf_done(struct amvdec_session *sess,
 			 struct vb2_v4l2_buffer *vbuf,
 			 u32 field, u32 type, u64 timestamp,
@@ -398,6 +406,8 @@ static void dst_buf_done(struct amvdec_session *sess,
 {
 	struct device *dev = sess->core->dev_dec;
 	u32 output_size = amvdec_get_output_size(sess);
+	bool last_after = false;
+	bool eos_now = false;
 
 	switch (sess->pixfmt_cap) {
 	case V4L2_PIX_FMT_NV12:
@@ -441,12 +451,20 @@ static void dst_buf_done(struct amvdec_session *sess,
 
 	if (sess->should_stop &&
 	    atomic_read(&sess->esparser_queued_bufs) <= 1) {
-		const struct v4l2_event ev = { .type = V4L2_EVENT_EOS };
-
 		dev_dbg(dev, "Signaling EOS, sequence_cap = %u\n",
 			sess->sequence_cap - 1);
-		v4l2_event_queue_fh(&sess->fh, &ev);
-		vbuf->flags |= V4L2_BUF_FLAG_LAST;
+		/*
+		 * FFmpeg (5.1 *_v4l2m2m) drops a decoded frame that carries
+		 * LAST, and stops dequeuing once it sees the EOS event. End
+		 * with an empty LAST buffer, which also signals EOS.
+		 */
+		if (mark_stopped) {
+			vbuf->flags |= V4L2_BUF_FLAG_LAST;
+			eos_now = true;
+		} else if (v4l2_m2m_num_dst_bufs_ready(sess->m2m_ctx))
+			last_after = true;
+		else	/* the next queued CAPTURE buffer carries it */
+			WRITE_ONCE(sess->last_pending, true);
 	} else if (sess->should_stop)
 		dev_dbg(dev, "should_stop, %u bufs remain\n",
 			atomic_read(&sess->esparser_queued_bufs));
@@ -458,6 +476,10 @@ static void dst_buf_done(struct amvdec_session *sess,
 		v4l2_m2m_last_buffer_done(sess->m2m_ctx, vbuf);
 	else
 		v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_DONE);
+	if (eos_now)
+		amvdec_signal_eos(sess);
+	if (last_after)
+		amvdec_dst_buf_done_empty_last(sess);
 
 	/* Buffer done probably means the vififo got freed. */
 	amvdec_m2m_retry_job(sess);
@@ -514,6 +536,8 @@ bool amvdec_dst_buf_done_empty_last(struct amvdec_session *sess)
 	unsigned int plane;
 
 	vbuf = v4l2_m2m_dst_buf_remove(sess->m2m_ctx);
+	/* none free: the next queued CAPTURE buffer carries the LAST */
+	WRITE_ONCE(sess->last_pending, !vbuf);
 	if (!vbuf)
 		return false;
 
@@ -525,6 +549,8 @@ bool amvdec_dst_buf_done_empty_last(struct amvdec_session *sess)
 	vbuf->field = V4L2_FIELD_NONE;
 	memset(&vbuf->timecode, 0, sizeof(vbuf->timecode));
 	v4l2_m2m_last_buffer_done(sess->m2m_ctx, vbuf);
+	if (sess->should_stop)
+		amvdec_signal_eos(sess);
 	return true;
 }
 EXPORT_SYMBOL_GPL(amvdec_dst_buf_done_empty_last);

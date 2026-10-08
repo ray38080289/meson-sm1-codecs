@@ -645,6 +645,13 @@ static void vdec_vb2_buf_queue(struct vb2_buffer *vb)
 		held = codec_ops->hold_capture_buf(sess, vbuf);
 	if (!held)
 		v4l2_m2m_buf_queue(m2m_ctx, vbuf);
+	/* EOS had no free buffer for its empty LAST: use this one */
+	if (vb->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE && !held &&
+	    READ_ONCE(sess->last_pending)) {
+		WRITE_ONCE(sess->last_pending, false);
+		amvdec_dst_buf_done_empty_last(sess);
+		return;
+	}
 	if (vb->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE && !held &&
 	    codec_ops->capture_queued)
 		codec_ops->capture_queued(sess);
@@ -728,6 +735,7 @@ static int vdec_start_streaming(struct vb2_queue *q, unsigned int count)
 	sess->vififo_context_valid = false;
 
 	sess->should_stop = 0;
+	sess->last_pending = false;
 	sess->keyframe_found = 0;
 	sess->last_offset = 0;
 	sess->wrap_count = 0;
@@ -1195,6 +1203,7 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 	if (cmd->cmd == V4L2_DEC_CMD_START) {
 		v4l2_m2m_clear_state(sess->m2m_ctx);
 		sess->should_stop = 0;
+		sess->last_pending = false;
 		sess->draining = false;
 		return 0;
 	}

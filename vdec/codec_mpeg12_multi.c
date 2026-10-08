@@ -345,6 +345,19 @@ static void mpeg12m_next_run(struct codec_mpeg12m *m, bool commit)
 		m->running = false;
 	}
 
+	/*
+	 * Clients that queue CAPTURE buffers only after STREAMON (FFmpeg)
+	 * start us without any: map the canvases once buffers exist.
+	 */
+	if (!sess->canvas_num) {
+		if (!v4l2_m2m_num_dst_bufs_ready(sess->m2m_ctx) ||
+		    amvdec_set_canvases(sess, (u32[]){ ANC0_CANVAS_ADDR, 0 },
+					(u32[]){ MAX_BUFS, 0 })) {
+			m->waiting_buffer = true;
+			return;
+		}
+	}
+
 	idx = mpeg12m_find_free(m);
 	if (idx < 0) {
 		m->waiting_buffer = true;
@@ -433,10 +446,13 @@ static int codec_mpeg12m_start(struct amvdec_session *sess)
 	}
 	m->dmc = ioremap(0xff638000, 0x400);	/* G12A/SM1 DMC */
 
-	ret = amvdec_set_canvases(sess, (u32[]){ ANC0_CANVAS_ADDR, 0 },
-				  (u32[]){ MAX_BUFS, 0 });
-	if (ret)
-		goto free;
+	/* without CAPTURE buffers yet, next_run() maps the canvases */
+	if (v4l2_m2m_num_dst_bufs_ready(sess->m2m_ctx)) {
+		ret = amvdec_set_canvases(sess, (u32[]){ ANC0_CANVAS_ADDR, 0 },
+					  (u32[]){ MAX_BUFS, 0 });
+		if (ret)
+			goto free;
+	}
 
 	sess->keyframe_found = 1;
 	sess->priv = m;

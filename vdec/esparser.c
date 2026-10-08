@@ -100,8 +100,12 @@ static int vp9_update_header(struct amvdec_core *core, struct vb2_buffer *buf)
 		num_frames = (marker & 0x7) + 1;
 		mag = ((marker >> 3) & 0x3) + 1;
 		mag_ptr = dsize - mag * num_frames - 2;
-		if (dp[mag_ptr] != marker)
+		if (dp[mag_ptr] != marker) {
+			dev_warn_ratelimited(core->dev,
+					     "VP9 superframe index mismatch (size %d, marker %#x), packet dropped\n",
+				 dsize, marker);
 			return 0;
+		}
 
 		mag_ptr++;
 		for (cur_frame = 0; cur_frame < num_frames; cur_frame++) {
@@ -340,6 +344,9 @@ esparser_queue_locked(struct amvdec_session *sess,
 
 	ret = amvdec_add_ts(sess, vb->timestamp, vbuf->timecode, offset, vbuf->flags);
 	if (ret) {
+		dev_warn_ratelimited(core->dev,
+				     "esparser: no timestamp slot (%d), packet dropped\n",
+				     ret);
 		v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
 		return ret;
 	}
@@ -356,6 +363,8 @@ esparser_queue_locked(struct amvdec_session *sess,
 
 		/* If unable to alter buffer to add headers */
 		if (payload_size == 0) {
+			dev_warn_ratelimited(core->dev,
+					     "esparser: VP9 header update failed, packet dropped\n");
 			amvdec_remove_ts(sess, vb->timestamp);
 			v4l2_m2m_buf_done(vbuf, VB2_BUF_STATE_ERROR);
 

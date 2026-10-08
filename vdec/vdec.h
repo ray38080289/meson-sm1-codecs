@@ -300,6 +300,7 @@ enum amvdec_m2m_job_state {
  *		 or empty buffer
  * @draining: queued input is being drained before decoder stop
  * @eos_drain: @drain runs for a decoder stop command (not a teardown)
+ * @last_pending: EOS reached with no CAPTURE buffer free for the empty LAST
  * @keyframe_found: flag set once a keyframe has been parsed
  * @num_dst_bufs: number of destination buffers
  * @changed_format: the format changed
@@ -363,6 +364,7 @@ struct amvdec_session {
 	unsigned int should_stop;
 	unsigned int draining;
 	bool eos_drain;
+	bool last_pending;
 	unsigned int keyframe_found;
 	unsigned int num_dst_bufs;
 	unsigned int changed_format;
