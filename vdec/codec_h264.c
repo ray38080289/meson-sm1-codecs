@@ -485,6 +485,8 @@ struct amvdec_codec_ops codec_h264_ops = {
 	.threaded_isr = codec_h264_threaded_isr,
 	.can_recycle = codec_h264_can_recycle,
 	.recycle = codec_h264_recycle,
+	/* finish queued input before the end code (see vdec_m2m_finish_drain) */
+	.async_drain = true,
 	.eos_sequence = codec_h264_eos_sequence,
 	.resume = codec_h264_resume,
 };

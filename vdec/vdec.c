@@ -1260,6 +1260,31 @@ static int vdec_g_pixelaspect(struct file *file, void *fh, int type,
 	return 0;
 }
 
+/*
+ * Coherent DMA memory is uncached for the CPU on arm64: copying or
+ * converting one 1080p NV12 frame out of it took ~25 ms and capped every
+ * codec at ~36 fps. Allocate CAPTURE buffers cacheable instead; vb2 then
+ * invalidates them on DQBUF. OUTPUT stays coherent: the esparser pads it
+ * through the kernel mapping after the buffer was prepared.
+ */
+static int vdec_reqbufs(struct file *file, void *priv,
+			struct v4l2_requestbuffers *rb)
+{
+	if (rb->type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
+	    rb->memory == V4L2_MEMORY_MMAP)
+		rb->flags |= V4L2_MEMORY_FLAG_NON_COHERENT;
+	return v4l2_m2m_ioctl_reqbufs(file, priv, rb);
+}
+
+static int vdec_create_bufs(struct file *file, void *priv,
+			    struct v4l2_create_buffers *cb)
+{
+	if (cb->format.type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
+	    cb->memory == V4L2_MEMORY_MMAP)
+		cb->flags |= V4L2_MEMORY_FLAG_NON_COHERENT;
+	return v4l2_m2m_ioctl_create_bufs(file, priv, cb);
+}
+
 static const struct v4l2_ioctl_ops vdec_ioctl_ops = {
 	.vidioc_querycap = vdec_querycap,
 	.vidioc_enum_fmt_vid_cap = vdec_enum_fmt,
@@ -1270,13 +1295,13 @@ static const struct v4l2_ioctl_ops vdec_ioctl_ops = {
 	.vidioc_g_fmt_vid_out_mplane = vdec_g_fmt,
 	.vidioc_try_fmt_vid_cap_mplane = vdec_try_fmt,
 	.vidioc_try_fmt_vid_out_mplane = vdec_try_fmt,
-	.vidioc_reqbufs = v4l2_m2m_ioctl_reqbufs,
+	.vidioc_reqbufs = vdec_reqbufs,
 	.vidioc_querybuf = v4l2_m2m_ioctl_querybuf,
 	.vidioc_prepare_buf = v4l2_m2m_ioctl_prepare_buf,
 	.vidioc_qbuf = v4l2_m2m_ioctl_qbuf,
 	.vidioc_expbuf = v4l2_m2m_ioctl_expbuf,
 	.vidioc_dqbuf = v4l2_m2m_ioctl_dqbuf,
-	.vidioc_create_bufs = v4l2_m2m_ioctl_create_bufs,
+	.vidioc_create_bufs = vdec_create_bufs,
 	.vidioc_streamon = v4l2_m2m_ioctl_streamon,
 	.vidioc_streamoff = v4l2_m2m_ioctl_streamoff,
 	.vidioc_enum_framesizes = vdec_enum_framesizes,
@@ -1309,6 +1334,7 @@ static int m2m_queue_init(void *priv, struct vb2_queue *src_vq,
 
 	dst_vq->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
 	dst_vq->io_modes = VB2_MMAP | VB2_DMABUF;
+	dst_vq->allow_cache_hints = 1;
 	dst_vq->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_COPY;
 	dst_vq->ops = &vdec_vb2_ops;
 	dst_vq->mem_ops = &vb2_dma_contig_memops;
