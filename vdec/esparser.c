@@ -184,15 +184,17 @@ static int vp9_update_header(struct amvdec_core *core, struct vb2_buffer *buf)
  */
 static u32 esparser_pad_start_code(struct amvdec_core *core,
 				   struct vb2_buffer *vb,
-				   u32 payload_size)
+				   u32 payload_size, u32 min_pad)
 {
 	u32 pad_size = 0;
 	u8 *vaddr = vb2_plane_vaddr(vb, 0);
 
-	if (payload_size < ESPARSER_MIN_PACKET_SIZE) {
+	if (payload_size < ESPARSER_MIN_PACKET_SIZE)
 		pad_size = ESPARSER_MIN_PACKET_SIZE - payload_size;
-		memset(vaddr + payload_size, 0, pad_size);
-	}
+	if (pad_size < min_pad &&
+	    payload_size + min_pad + SEARCH_PATTERN_LEN <= vb2_plane_size(vb, 0))
+		pad_size = min_pad;
+	memset(vaddr + payload_size, 0, pad_size);
 
 	if ((payload_size + pad_size + SEARCH_PATTERN_LEN) >
 						vb2_plane_size(vb, 0)) {
@@ -361,7 +363,14 @@ esparser_queue_locked(struct amvdec_session *sess,
 		}
 	}
 
-	pad_size = esparser_pad_start_code(core, vb, payload_size);
+	/*
+	 * Frame-based codecs stop at the end of each packet; the stream
+	 * prefetch reads past it, so keep 1 KiB of zeros behind the data
+	 * like the vendor VLD_PADDING_SIZE, or the tail never reaches the
+	 * decoder (HEVC: DECODE_BUFEMPTY short of HEVC_DECODE_SIZE).
+	 */
+	pad_size = esparser_pad_start_code(core, vb, payload_size,
+		sess->fmt_out->codec_ops->input_queued_buf ? SZ_4K : 0);
 	ret = esparser_write_data(core, phy, payload_size + pad_size);
 
 	if (ret <= 0) {

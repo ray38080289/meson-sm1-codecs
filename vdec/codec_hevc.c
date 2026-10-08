@@ -320,6 +320,8 @@ struct codec_hevc {
 	u8 start_decoding_flag;
 	u8 rps_set_id;
 	u8 rps_used_bit;
+	bool rpm_layout_known;
+	bool rpm_legacy;	/* multi protocol, legacy RPM layout */
 	bool input_has_frame;
 	bool input_pending;
 	bool waiting_for_input;
@@ -833,8 +835,9 @@ static int codec_hevc_start(struct amvdec_session *sess)
 	hevc = codec_hevc_get_context(sess);
 	if (!hevc)
 		return -ENOMEM;
-	hevc->rps_used_bit = multi ? RPS_USED_BIT_MULTI :
-					 RPS_USED_BIT_LEGACY;
+	if (!hevc->rpm_layout_known)
+		hevc->rps_used_bit = multi ? RPS_USED_BIT_MULTI :
+						 RPS_USED_BIT_LEGACY;
 
 	ret = codec_hevc_setup_workspace(sess, hevc);
 	if (ret)
@@ -1968,6 +1971,35 @@ static void codec_hevc_fetch_rpm(struct amvdec_session *sess)
 
 	if (sess->fmt_out->codec_ops->irq != AMVDEC_IRQ_MBOX0) {
 		memcpy(hevc->rpm_param.l.data, raw, sizeof(raw));
+		return;
+	}
+
+	/*
+	 * The vendor (Android) sm1 HEVC ucode speaks the multi protocol with
+	 * the legacy RPM layout. Tell them apart on the first slice that is
+	 * unambiguous: nuh_temporal_id_plus1 is 1..7, NAL types 0..21.
+	 */
+	if (!hevc->rpm_layout_known) {
+		u32 off = RPM_MULTI_POST_TILE_OFFSET - RPM_LEGACY_POST_TILE_OFFSET;
+		u32 tid = RPM_LEGACY_POST_TILE_OFFSET + 8;	/* m_temporalId */
+		bool legacy = raw[tid] >= 1 && raw[tid] <= 7 &&
+			      raw[tid + 1] <= 21;
+		bool multi = raw[tid + off] >= 1 && raw[tid + off] <= 7 &&
+			     raw[tid + off + 1] <= 21;
+
+		if (legacy != multi) {
+			hevc->rpm_layout_known = true;
+			hevc->rpm_legacy = legacy;
+			hevc->rps_used_bit = legacy ? RPS_USED_BIT_LEGACY :
+						      RPS_USED_BIT_MULTI;
+			dev_info(sess->core->dev, "HEVC ucode RPM layout: %s\n",
+				 legacy ? "legacy" : "multi");
+		}
+	}
+	if (hevc->rpm_legacy) {
+		memcpy(hevc->rpm_param.l.data, raw, sizeof(raw));
+		hevc->max_dec_pic_buffering = raw[RPM_MULTI_DPB_OFFSET -
+			(RPM_MULTI_POST_TILE_OFFSET - RPM_LEGACY_POST_TILE_OFFSET)];
 		return;
 	}
 
