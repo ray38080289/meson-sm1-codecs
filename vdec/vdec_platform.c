@@ -287,8 +287,8 @@ static const struct amvdec_format vdec_formats_sm1[] = {
 		.max_width = 3840,
 		.max_height = 2160,
 		.vdec_ops = &vdec_1_ops,
-		.codec_ops = &codec_h264_g12a_ops,
-		.firmware_path = "meson/vdec/g12a_h264_multi.bin",
+		.codec_ops = &codec_h264_ops,
+		.firmware_path = "meson/vdec/g12a_h264.bin",
 		.pixfmts_cap = { V4L2_PIX_FMT_NV12M, V4L2_PIX_FMT_NV12, 0 },
 		.flags = V4L2_FMT_FLAG_COMPRESSED |
 			 V4L2_FMT_FLAG_DYN_RESOLUTION,
@@ -359,6 +359,7 @@ const struct vdec_platform vdec_platform_sm1 = {
 	.revision = VDEC_REVISION_SM1,
 };
 
+MODULE_FIRMWARE("meson/vdec/g12a_h264.bin");
 MODULE_FIRMWARE("meson/vdec/g12a_h264_multi.bin");
 MODULE_FIRMWARE("meson/vdec/g12a_hevc_mmu_multi.bin");
 MODULE_FIRMWARE("meson/vdec/g12a_vp9.bin");
@@ -368,4 +369,5 @@ MODULE_FIRMWARE("meson/vdec/gxl_mpeg12.bin");
 MODULE_FIRMWARE("meson/vdec/gxl_vp9.bin");
 MODULE_FIRMWARE("meson/vdec/gxm_h264.bin");
 MODULE_FIRMWARE("meson/vdec/sm1_hevc_mmu_multi.bin");
+MODULE_FIRMWARE("meson/vdec/sm1_mpeg12_multi.bin");
 MODULE_FIRMWARE("meson/vdec/sm1_vp9_mmu.bin");

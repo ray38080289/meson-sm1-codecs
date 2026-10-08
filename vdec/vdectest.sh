@@ -26,15 +26,22 @@ gen vp9.webm    $SRC=1920x1080:rate=30 -frames:v 30 -c:v libvpx-vp9 -deadline re
 gen vp9sd.webm  $SRC=720x576:rate=25 -frames:v 50 -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -b:v 2M
 gen vp9long.webm $SRC=1920x1080:rate=30 -frames:v 300 -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -b:v 6M -g 60
 gen vp910.webm  $SRC=1920x1080:rate=30 -frames:v 30 -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -pix_fmt yuv420p10le -b:v 4M
+gen a1080.h264  $SRC=1920x1080:rate=30 -frames:v 60 -c:v libx264 -preset fast -bf 0 -g 30 -f h264
+gen a1080b.h264 $SRC=1920x1080:rate=30 -frames:v 60 -c:v libx264 -preset fast -bf 3 -g 30 -f h264
+gen abase.h264  $SRC=1280x720:rate=30 -frames:v 60 -c:v libx264 -profile:v baseline -g 30 -f h264
+gen asd.h264    $SRC=720x576:rate=25 -frames:v 50 -c:v libx264 -preset fast -f h264
+gen along.h264  $SRC=1920x1080:rate=30 -frames:v 300 -c:v libx264 -preset fast -bf 3 -g 60 -b:v 8M -f h264
 
 for f in m2.m2v m2b.m2v m2sd.m2v m2i.m2v m1.m1v m2long.m2v \
 	 h1080.hevc hsd.hevc hlong.hevc h10.hevc \
-	 vp9.webm vp9sd.webm vp9long.webm vp910.webm; do
+	 vp9.webm vp9sd.webm vp9long.webm vp910.webm \
+	 a1080.h264 a1080b.h264 abase.h264 asd.h264 along.h264; do
 	case $f in *${1:-}*) ;; *) continue ;; esac
 	case $f in
 	*.m2v|*.m1v) dec="mpegvideoparse ! v4l2mpeg4dec" ;;
 	*.hevc) dec="h265parse ! v4l2h265dec" ;;
 	*.webm) dec="matroskademux ! v4l2vp9dec" ;;
+	*.h264) dec="h264parse ! v4l2h264dec" ;;
 	esac
 	size=$(ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=s=x:p=0 "$f" | head -1)
 	size=${size%x}	# some containers add a trailing separator
