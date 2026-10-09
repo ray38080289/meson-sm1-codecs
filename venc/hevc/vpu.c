@@ -54,6 +54,7 @@
 		 READ_VREG(DOS_MEM_PD_WAVE420L))
 #include "vpu.h"
 #include "vmm.h"
+#include "w4enc.h"
 
 /* definitions to be changed as customer  configuration */
 /* if you want to have clock gating scheme frame by frame */
@@ -138,6 +139,8 @@ static struct vpu_clks s_vpu_clks;
 
 static u32 vpu_src_addr_config(struct vpu_dma_buf_info_t);
 static void vpu_dma_buffer_unmap(struct vpu_dma_cfg *cfg);
+static void vpu_power_up(void);
+static void vpu_power_down(void);
 
 static void dma_flush(u32 buf_start, u32 buf_size)
 {
@@ -370,7 +373,8 @@ static void hevcenc_isr_tasklet(ulong data)
 			kill_fasync(&dev->async_queue, SIGIO, POLL_IN);
 		}
 		s_interrupt_flag = 1;
-		wake_up_interruptible(&s_interrupt_wait_q);
+		/* not _interruptible: henc_k_wait_irq() sleeps uninterruptibly */
+		wake_up(&s_interrupt_wait_q);
 	}
 	enc_pr(LOG_ALL, "[-]%s\n", __func__);
 }
@@ -429,10 +433,10 @@ static s32 vpu_open(struct inode *inode, struct file *filp)
 	if (s_vpu_drv_context.open_count == 1) {
 		alloc_buffer = true;
 	} else {
-		r = -EBUSY;
+		/* hk1: not via Err, which decremented open_count a second time */
 		s_vpu_drv_context.open_count--;
 		spin_unlock(&s_vpu_lock);
-		goto Err;
+		return -EBUSY;
 	}
 	filp->private_data = (void *)(&s_vpu_drv_context);
 	spin_unlock(&s_vpu_lock);
@@ -484,9 +488,6 @@ static s32 vpu_open(struct inode *inode, struct file *filp)
 		r = -ENOMEM;
 	}
 	if (alloc_buffer) {
-		ulong flags;
-		u32 data32;
-
 		if ((s_vpu_irq >= 0) && (s_vpu_irq_requested == false)) {
 			s32 err;
 
@@ -500,6 +501,24 @@ static s32 vpu_open(struct inode *inode, struct file *filp)
 			}
 			s_vpu_irq_requested = true;
 		}
+		vpu_power_up();
+	}
+	memset(dma_cfg, 0, sizeof(dma_cfg));
+	dma_cfg[0].fd = -1;
+	dma_cfg[1].fd = -1;
+	dma_cfg[2].fd = -1;
+Err:
+	if (r != 0)
+		s_vpu_drv_context.open_count--;
+	enc_pr(LOG_DEBUG, "[-] %s, ret: %d\n", __func__, r);
+	return r;
+}
+
+static void vpu_power_up(void)
+{
+		ulong flags;
+		u32 data32;
+
 		if (get_cpu_type() >= MESON_CPU_MAJOR_ID_SC2) {
 		
 		} else
@@ -573,16 +592,6 @@ static s32 vpu_open(struct inode *inode, struct file *filp)
 		pr_debug("HevcEnc: product number %#x (expect 0x4201)\n",
 			 readl((void __iomem *)s_vpu_register.virt_addr + 0x1044));
 		spin_unlock_irqrestore(&s_vpu_lock, flags);
-	}
-	memset(dma_cfg, 0, sizeof(dma_cfg));
-	dma_cfg[0].fd = -1;
-	dma_cfg[1].fd = -1;
-	dma_cfg[2].fd = -1;
-Err:
-	if (r != 0)
-		s_vpu_drv_context.open_count--;
-	enc_pr(LOG_DEBUG, "[-] %s, ret: %d\n", __func__, r);
-	return r;
 }
 
 static long vpu_ioctl(struct file *filp, u32 cmd, ulong arg)
@@ -1521,7 +1530,6 @@ static ssize_t vpu_write(struct file *filp,
 static s32 vpu_release(struct inode *inode, struct file *filp)
 {
 	s32 ret = 0;
-	ulong flags;
 
 	enc_pr(LOG_DEBUG, "vpu_release\n");
 	ret = down_interruptible(&s_vpu_sem);
@@ -1562,6 +1570,17 @@ static s32 vpu_release(struct inode *inode, struct file *filp)
 				free_irq(s_vpu_irq, &s_vpu_drv_context);
 				s_vpu_irq_requested = false;
 			}
+			vpu_power_down();
+		}
+	}
+	up(&s_vpu_sem);
+	return 0;
+}
+
+static void vpu_power_down(void)
+{
+			ulong flags;
+
 			spin_lock_irqsave(&s_vpu_lock, flags);
 
 			if (get_cpu_type() >= MESON_CPU_MAJOR_ID_SC2) {
@@ -1595,10 +1614,72 @@ static s32 vpu_release(struct inode *inode, struct file *filp)
 			if (get_cpu_type() >= MESON_CPU_MAJOR_ID_SC2) {
 			} else
 			    amports_switch_gate("vdec", 0);
-		}
+}
+
+/* ---- in-kernel user (venc_v4l2.c), exclusive with /dev/HevcEnc ---- */
+
+int henc_k_get(void)
+{
+	int ret;
+
+	spin_lock(&s_vpu_lock);
+	if (s_vpu_drv_context.open_count) {
+		spin_unlock(&s_vpu_lock);
+		return -EBUSY;
 	}
-	up(&s_vpu_sem);
+	s_vpu_drv_context.open_count++;
+	spin_unlock(&s_vpu_lock);
+
+	ret = request_irq(s_vpu_irq, vpu_irq_handler, 0, "HevcEnc-irq",
+			  &s_vpu_drv_context);
+	if (ret) {
+		spin_lock(&s_vpu_lock);
+		s_vpu_drv_context.open_count--;
+		spin_unlock(&s_vpu_lock);
+		return ret;
+	}
+	s_vpu_irq_requested = true;
+	vpu_power_up();
+	henc_k_clear_irq();
+	s_bit_firmware_info[0].size = 1;	/* irq handler skips cores without */
 	return 0;
+}
+
+void henc_k_put(void)
+{
+	down(&s_vpu_sem);
+	s_bit_firmware_info[0].size = 0;
+	free_irq(s_vpu_irq, &s_vpu_drv_context);
+	s_vpu_irq_requested = false;
+	vpu_power_down();
+	s_vpu_drv_context.open_count--;
+	up(&s_vpu_sem);
+}
+
+void __iomem *henc_k_regs(void)
+{
+	return (void __iomem *)s_vpu_register.virt_addr;
+}
+
+struct device *henc_k_dev(void)
+{
+	return &hevc_pdev->dev;
+}
+
+void henc_k_clear_irq(void)
+{
+	s_interrupt_flag = 0;
+	s_vpu_drv_context.interrupt_reason = 0;
+}
+
+/* interrupt reason bits, 0 on timeout */
+u32 henc_k_wait_irq(unsigned int ms)
+{
+	if (!wait_event_timeout(s_interrupt_wait_q, READ_ONCE(s_interrupt_flag),
+				msecs_to_jiffies(ms)))
+		return 0;
+	s_interrupt_flag = 0;
+	return xchg(&s_vpu_drv_context.interrupt_reason, 0);
 }
 
 static s32 vpu_fasync(s32 fd, struct file *filp, s32 mode)
@@ -2173,6 +2254,8 @@ static s32 vpu_probe(struct platform_device *pdev)
 		enc_pr(LOG_DEBUG,
 			"success to probe vpu device with video memory from cma\n");
 	hevc_pdev = pdev;
+	if (w4_v4l2_register(&pdev->dev))
+		enc_pr(LOG_ERROR, "V4L2 encoder registration failed\n");
 	return 0;
 
 ERROR_PROVE_DEVICE:
@@ -2208,6 +2291,7 @@ ERROR_PROVE_DEVICE:
 static void vpu_remove(struct platform_device *pdev)
 {
 	enc_pr(LOG_DEBUG, "vpu_remove\n");
+	w4_v4l2_unregister();
 
 	if (s_instance_pool.base) {
 		vfree((const void *)s_instance_pool.base);

@@ -34,7 +34,9 @@ i420) fmtopt="" ;;
 esac
 
 tmp=$(mktemp -d /tmp/henc.XXXXXX)
-trap 'rm -rf "$tmp"' EXIT
+# the FIFO helpers block in open() if w4_enc_test fails before opening them
+pids=
+trap 'kill $pids 2>/dev/null || :; rm -rf "$tmp"' EXIT
 mkfifo "$tmp/in" "$tmp/out"
 
 rc=0; [ "$kbps" -gt 0 ] && rc=1
@@ -52,7 +54,9 @@ sed -e "s/^SourceWidth .*/SourceWidth : $w/" \
 
 exec 3<&0
 cat <&3 > "$tmp/in" &
+pids=$!
 cat "$tmp/out" &
+pids="$pids $!"
 cd "$LIB"
 ./w4_enc_test --codec 12 --cfgFileName "$tmp/enc.cfg" --input "$tmp/in" \
 	--output "$tmp/out" --picWidth "$w" --picHeight "$h" $fmtopt \

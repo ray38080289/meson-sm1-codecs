@@ -40,6 +40,32 @@ venc -s WxH [-f nv12|nv21|i420] [-q QP | -b KBPS -r FPS] [-g GOP] [-n FRAMES] [-
 
 Output is raw H.264; wrap with `ffmpeg -r 30 -i out.h264 -c copy out.mp4`.
 
+## V4L2 encoders (FFmpeg / GStreamer)
+
+Both modules also register standard V4L2 mem2mem encoders: `meson-venc-h264`
+(`avc/venc_v4l2.c`, HCodec, up to 1920x1088) and `meson-venc-hevc`
+(`hevc/venc_v4l2.c` + `hevc/w4enc.c`, WAVE420L, 256x128 up to 4096x2304,
+firmware `meson/venc/monet.bin` from `get-firmware.py`). NV12/NV21, one or two
+planes; bitrate, GOP, I/P/min/max QP and force-key-frame controls.
+
+```
+ffmpeg -i in.mkv -c:v hevc_v4l2m2m -b:v 6M -g 60 out.mp4
+gst-launch-1.0 filesrc location=in.mkv ! matroskademux ! h264parse ! v4l2h264dec ! v4l2h265enc extra-controls=controls,video_bitrate=6000000 ! h265parse ! matroskamux ! filesink location=out.mkv
+```
+
+* `w4enc.c` replays the Chips&Media vpuapi command sequence (traced from the
+  sample) in the kernel: IPPP, firmware rate control, IDRs forced by the driver
+  and preceded by VPS/SPS/PPS.
+* `/dev/HevcEnc` (`henc`) and the V4L2 HEVC encoder exclude each other (`EBUSY`).
+* FFmpeg 5.1 `*_v4l2m2m` cannot write MKV directly (no extradata): write
+  `.mp4`/raw and remux. `rawvideoparse` needs `colorimetry=bt709` for GStreamer.
+* 4K HEVC with FFmpeg needs `-num_output_buffers 6` (16 x 12 MB OUTPUT buffers
+  exhaust the 256 MB CMA); 4K zero-copy decode + encode needs a larger CMA.
+* `meson_vdec`'s HEVC decoder outputs only the first frame of WAVE420L streams
+  (also the C&M sample's own); libavcodec decodes them fine. Suspects: SPS
+  short-term RPS sets, `lists_modification_present_flag`,
+  `dependent_slice_segments_enabled_flag`, `vps_extension_flag`.
+
 ## Measured
 
 * H.264 Main, CABAC, I/P only, up to 1920x1088
