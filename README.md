@@ -133,7 +133,8 @@ Not AI-generated, and imported unmodified in their own commits:
 * `venc-h264/encoder.c`: Amlogic's HCodec driver, imported together with
   its first port
 
-Commits made with Claude carry a `Co-Authored-By: Claude` trailer.
+Claude is the author of every commit it wrote, with the repository owner as
+committer and co-author; the two imports above are authored by the owner.
 
 ## Licence
 
