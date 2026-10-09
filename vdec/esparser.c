@@ -313,16 +313,26 @@ esparser_queue_locked(struct amvdec_session *sess,
 		return -EAGAIN;
 
 	/*
-	 * When max ref frame is held by VP9, this should be -= 3 to prevent a
-	 * shortage of CAPTURE buffers on the decoder side.
+	 * Frame-based HEVC takes one compressed frame at a time and needs one
+	 * free CAPTURE buffer for it. The reserve of 3 below would stall it
+	 * for good on streams with a small DPB (e.g. one reference frame: four
+	 * buffers, one held as reference, one with userspace).
+	 *
+	 * Otherwise, when max ref frame is held by VP9, this should be -= 3 to
+	 * prevent a shortage of CAPTURE buffers on the decoder side.
 	 * For the future, a good enhancement of the way this is handled could
 	 * be to notify new capture buffers to the decoding modules, so that
 	 * they could pause when there is no capture buffer available and
 	 * resume on this notification.
 	 */
-	if ((sess->fmt_out->pixfmt == V4L2_PIX_FMT_VP9 ||
-	     sess->fmt_out->pixfmt == V4L2_PIX_FMT_HEVC) &&
-	    sess->streamon_cap) {
+	if (codec_ops->can_queue_input &&
+	    sess->fmt_out->pixfmt == V4L2_PIX_FMT_HEVC && sess->streamon_cap) {
+		if (!v4l2_m2m_num_dst_bufs_ready(sess->m2m_ctx) ||
+		    esparser_vififo_get_free_space(sess) < payload_size)
+			return -EAGAIN;
+	} else if ((sess->fmt_out->pixfmt == V4L2_PIX_FMT_VP9 ||
+		    sess->fmt_out->pixfmt == V4L2_PIX_FMT_HEVC) &&
+		   sess->streamon_cap) {
 		if (codec_ops->num_pending_bufs)
 			num_dst_bufs = codec_ops->num_pending_bufs(sess);
 

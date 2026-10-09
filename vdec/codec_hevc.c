@@ -985,6 +985,21 @@ static void codec_hevc_flush_output(struct amvdec_session *sess)
 	codec_hevc_flush_output_mode(sess, false);
 }
 
+/*
+ * End of stream (should_stop set): dst_buf_done() flags LAST on the output
+ * that drops the queued count to 0. When every picture went out before the
+ * stop, none did, so end with an empty LAST buffer.
+ */
+static void codec_hevc_drain(struct amvdec_session *sess)
+{
+	int q0 = atomic_read(&sess->esparser_queued_bufs);
+
+	codec_hevc_flush_output(sess);
+	if (!(atomic_read(&sess->esparser_queued_bufs) < q0 &&
+	      atomic_read(&sess->esparser_queued_bufs) <= 0))
+		amvdec_dst_buf_done_empty_last(sess);
+}
+
 static void codec_hevc_flush_source_change(struct amvdec_session *sess)
 {
 	/* Held reference-only buffers remain queued; they are not decoded frames. */
@@ -2229,7 +2244,7 @@ static void codec_hevc_finish_job(struct amvdec_session *sess)
 		!v4l2_m2m_num_src_bufs_ready(sess->m2m_ctx);
 	if (last_input) {
 		sess->should_stop = 1;
-		codec_hevc_flush_output(sess);
+		codec_hevc_drain(sess);
 		v4l2_m2m_mark_stopped(sess->m2m_ctx);
 		sess->draining = false;
 	}
@@ -2363,6 +2378,6 @@ struct amvdec_codec_ops codec_hevc_g12a_ops = {
 	.threaded_isr = codec_hevc_threaded_isr,
 	.num_pending_bufs = codec_hevc_num_pending_bufs,
 	.hold_capture_buf = codec_hevc_hold_capture_buf,
-	.drain = codec_hevc_flush_output,
+	.drain = codec_hevc_drain,
 	.resume = codec_hevc_resume,
 };
