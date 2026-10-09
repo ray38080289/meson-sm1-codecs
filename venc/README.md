@@ -61,10 +61,6 @@ gst-launch-1.0 filesrc location=in.mkv ! matroskademux ! h264parse ! v4l2h264dec
   `.mp4`/raw and remux. `rawvideoparse` needs `colorimetry=bt709` for GStreamer.
 * 4K HEVC with FFmpeg needs `-num_output_buffers 6` (16 x 12 MB OUTPUT buffers
   exhaust the 256 MB CMA); 4K zero-copy decode + encode needs a larger CMA.
-* `meson_vdec`'s HEVC decoder outputs only the first frame of WAVE420L streams
-  (also the C&M sample's own); libavcodec decodes them fine. Suspects: SPS
-  short-term RPS sets, `lists_modification_present_flag`,
-  `dependent_slice_segments_enabled_flag`, `vps_extension_flag`.
 
 ## Measured
 
