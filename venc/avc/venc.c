@@ -50,7 +50,7 @@ static void usage(void)
 		"            [-S STRIDE -U CHROMA_OFFSET -B FRAME_BYTES]\n"
 		"  raw frames on stdin, H.264 Annex-B on stdout\n"
 		"  -S/-U/-B describe padded input (default: tightly packed), e.g. GStreamer\n"
-		"           v4l2h264dec 1080p NV12 output is -S 1920 -U 2097152 -B 3145728\n"
+		"           v4l2h264dec/v4l2h265dec 1080p NV12 to fdsink is -S 1920 -U 2073600 -B 3145728\n"
 		"  -q  fixed QP 10..51 (default 26)\n"
 		"  -b  target bitrate in kbit/s (frame-level rate control), -r frame rate (default 30)\n"
 		"  -g  IDR interval in frames (default 60, 0 = only the first frame)\n");

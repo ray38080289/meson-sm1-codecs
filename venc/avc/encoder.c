@@ -3654,22 +3654,10 @@ static u32 checkCMA(void)
 }
 #endif
 
-/* file operation */
-static s32 amvenc_avc_open(struct inode *inode, struct file *file)
+/* one encoder instance with its 20 MiB work buffer (char device or V4L2) */
+static struct encode_wq_s *avc_instance_open(void)
 {
-	s32 r = 0;
 	struct encode_wq_s *wq = NULL;
-
-	file->private_data = NULL;
-	enc_pr(LOG_DEBUG, "avc open\n");
-
-#ifdef CONFIG_AM_JPEG_ENCODER
-	if (jpegenc_on() == true) {
-		enc_pr(LOG_ERROR,
-			"hcodec in use for JPEG Encode now.\n");
-		return -EBUSY;
-	}
-#endif
 
 #ifdef CONFIG_CMA
 	if ((encode_manager.use_reserve == false) &&
@@ -3690,7 +3678,7 @@ static s32 amvenc_avc_open(struct inode *inode, struct file *file)
 	wq = create_encode_work_queue();
 	if (wq == NULL) {
 		enc_pr(LOG_ERROR, "amvenc_avc create instance fail.\n");
-		return -EBUSY;
+		return ERR_PTR(-EBUSY);
 	}
 
 #ifdef CONFIG_CMA
@@ -3710,7 +3698,7 @@ static s32 amvenc_avc_open(struct inode *inode, struct file *file)
 				encode_manager.this_pdev->name,
 				(void *)wq);
 			destroy_encode_work_queue(wq);
-			return -ENOMEM;
+			return ERR_PTR(-ENOMEM);
 		}
 	}
 #endif
@@ -3722,7 +3710,7 @@ static s32 amvenc_avc_open(struct inode *inode, struct file *file)
 			wq->mem.buf_start,
 			wq->mem.buf_size, (void *)wq);
 		destroy_encode_work_queue(wq);
-		return -ENOMEM;
+		return ERR_PTR(-ENOMEM);
 	}
 
 	memcpy(&wq->mem.bufspec, &amvenc_buffspec[0],
@@ -3732,8 +3720,200 @@ static s32 amvenc_avc_open(struct inode *inode, struct file *file)
 		"amvenc_avc  memory config success, buff start:0x%x, size is 0x%x, wq:%p.\n",
 		wq->mem.buf_start, wq->mem.buf_size, (void *)wq);
 
+	return wq;
+}
+
+/* AMVENC_AVC_IOC_CONFIG_INIT: size the buffers, then the kthread powers up */
+static s32 avc_instance_config(struct encode_wq_s *wq, u32 ucode_index,
+			       u32 rows_per_slice, u32 width, u32 height,
+			       u32 color_space)
+{
+	wq->ucode_index = ucode_index;
+#ifdef MULTI_SLICE_MC
+	wq->pic.rows_per_slice = rows_per_slice;
+#endif
+	if (is_oversize(width, height,
+			wq->mem.bufspec.max_width * wq->mem.bufspec.max_height)) {
+		enc_pr(LOG_ERROR,
+			"avc config init- encode size %dx%d is larger than supported (%dx%d).  wq:%p.\n",
+			width, height, wq->mem.bufspec.max_width,
+			wq->mem.bufspec.max_height, (void *)wq);
+		return -1;
+	}
+	wq->pic.encoder_width = width;
+	wq->pic.encoder_height = height;
+	wq->pic.color_space = color_space;
+	avc_buffspec_init(wq);
+	complete(&encode_manager.event.request_in_com);
+	return 0;
+}
+
+/* AMVENC_AVC_IOC_SUBMIT: picture numbering and reference swap after a frame */
+static void avc_instance_submit(struct encode_wq_s *wq, u32 amrisc_cmd)
+{
+	if (amrisc_cmd == ENCODER_IDR) {
+		wq->pic.idr_pic_id++;
+		if (wq->pic.idr_pic_id > 65535)
+			wq->pic.idr_pic_id = 0;
+		wq->pic.pic_order_cnt_lsb = 2;
+		wq->pic.frame_number = 1;
+	} else if (amrisc_cmd == ENCODER_NON_IDR) {
+#ifdef H264_ENC_SVC
+		/* only update when there is reference frame */
+		if (wq->pic.enable_svc == 0 || wq->pic.non_ref_cnt == 0) {
+			wq->pic.frame_number++;
+			enc_pr(LOG_INFO, "Increase frame_num to %d\n",
+				wq->pic.frame_number);
+		}
+#else
+		wq->pic.frame_number++;
+#endif
+
+		wq->pic.pic_order_cnt_lsb += 2;
+		if (wq->pic.frame_number > 65535)
+			wq->pic.frame_number = 0;
+	}
+#ifdef H264_ENC_SVC
+	/* only update when there is reference frame */
+	if (wq->pic.enable_svc == 0 || wq->pic.non_ref_cnt == 0) {
+		amrisc_cmd = wq->mem.dblk_buf_canvas;
+		wq->mem.dblk_buf_canvas = wq->mem.ref_buf_canvas;
+		/* current dblk buffer as next reference buffer */
+		wq->mem.ref_buf_canvas = amrisc_cmd;
+		enc_pr(LOG_INFO,
+			"switch buffer enable %d  cnt %d\n",
+			wq->pic.enable_svc, wq->pic.non_ref_cnt);
+	}
+	if (wq->pic.enable_svc) {
+		wq->pic.non_ref_cnt ++;
+		if (wq->pic.non_ref_cnt > wq->pic.non_ref_limit) {
+			enc_pr(LOG_INFO, "Svc clear cnt %d conf %d\n",
+				wq->pic.non_ref_cnt,
+				wq->pic.non_ref_limit);
+			wq->pic.non_ref_cnt = 0;
+		} else
+		enc_pr(LOG_INFO,"Svc increase non ref counter to %d\n",
+			wq->pic.non_ref_cnt );
+	}
+#else
+	amrisc_cmd = wq->mem.dblk_buf_canvas;
+	wq->mem.dblk_buf_canvas = wq->mem.ref_buf_canvas;
+	/* current dblk buffer as next reference buffer */
+	wq->mem.ref_buf_canvas = amrisc_cmd;
+#endif
+}
+
+/*
+ * In-kernel encoder API for the V4L2 mem2mem wrapper (venc_v4l2.c): the
+ * same sequence as the venc tool, i.e. open + config, SEQUENCE once, then
+ * one IDR/NON_IDR request per frame followed by the SUBMIT bookkeeping.
+ * Requests still go through the encode kthread, which owns the hardware.
+ */
+struct encode_wq_s *avc_k_open(u32 width, u32 height)
+{
+	struct encode_wq_s *wq = avc_instance_open();
+
+	if (IS_ERR(wq))
+		return wq;
+	/* full ucode, one slice per picture, BT.601 */
+	if (avc_instance_config(wq, UCODE_MODE_FULL, ALIGN(height, 16) / 16,
+				width, height, 0)) {
+		destroy_encode_work_queue(wq);
+		return ERR_PTR(-EINVAL);
+	}
+	return wq;
+}
+
+void avc_k_close(struct encode_wq_s *wq)
+{
+	destroy_encode_work_queue(wq);
+}
+
+/* queue the request in a[] (ioctl layout), input planes by address, wait */
+static s32 avc_k_run(struct encode_wq_s *wq, u32 *a, u32 y, u32 uv)
+{
+	long t;
+
+	if (convert_request(wq, a))
+		return -EINVAL;
+	if (uv) {
+		/* NV12 planes by physical address: DMA_BUFF without dma-bufs */
+		wq->request.plane_num = 2;
+		wq->request.dma_cfg[0].paddr = (void *)(unsigned long)y;
+		wq->request.dma_cfg[0].fd = -1;
+		wq->request.dma_cfg[1].paddr = (void *)(unsigned long)uv;
+		wq->request.dma_cfg[1].fd = -1;
+	}
+	if (encode_wq_add_request(wq))
+		return -EBUSY;
+	t = wait_event_timeout(wq->request_complete,
+			       atomic_add_unless(&wq->request_ready, -1, 0),
+			       msecs_to_jiffies(6000));
+	return t ? 0 : -ETIMEDOUT;
+}
+
+/* SPS + PPS into the bitstream buffer */
+s32 avc_k_headers(struct encode_wq_s *wq, u32 qp, const u8 **data, u32 *len)
+{
+	u32 a[56] = { ENCODER_SEQUENCE, UCODE_MODE_FULL, qp,
+		      AMVENC_FLUSH_FLAG_OUTPUT };
+	s32 r = avc_k_run(wq, a, 0, 0);
+
+	if (r)
+		return r;
+	if (wq->hw_status != ENCODER_PICTURE_DONE)
+		return -EIO;
+	*len = (wq->output_size >> 16) + (wq->output_size & 0xffff);
+	*data = phys_to_virt(wq->mem.BitstreamStart);
+	return 0;
+}
+
+/* one picture from NV12 planes at physical addresses y/uv (pitch ALIGN32) */
+s32 avc_k_frame(struct encode_wq_s *wq, bool idr, u32 fmt, u32 y, u32 uv,
+		u32 qp, const u8 **data, u32 *len)
+{
+	u32 a[56] = { 0 };
+	u32 w = wq->pic.encoder_width, h = wq->pic.encoder_height;
+	s32 r;
+
+	/* GXTVBB+ always run the ucode in CBR mode: per-MB QP from this table */
+	memset(wq->mem.cbr_info_ddr_virt_addr, qp, CBR_TABLE_SIZE);
+	a[0] = idr ? ENCODER_IDR : ENCODER_NON_IDR;
+	a[1] = UCODE_MODE_FULL;
+	a[2] = DMA_BUFF;
+	a[3] = fmt;
+	a[5] = ALIGN(w, 32) * ALIGN(h, 16) * 3 / 2;
+	a[6] = qp;
+	a[7] = AMVENC_FLUSH_FLAG_OUTPUT | AMVENC_FLUSH_FLAG_CBR;
+	a[8] = 2000;	/* ms */
+	a[13] = w;
+	a[14] = h;
+	r = avc_k_run(wq, a, y, uv);
+	if (r)
+		return r;
+	/* the cabac ucode reports IDR_DONE for P frames too */
+	if ((wq->hw_status != ENCODER_IDR_DONE &&
+	     wq->hw_status != ENCODER_NON_IDR_DONE) || !wq->output_size ||
+	    wq->output_size > wq->mem.bufspec.bitstream.buf_size)
+		return -EIO;
+	*len = wq->output_size;
+	*data = phys_to_virt(wq->mem.BitstreamStart);
+	avc_instance_submit(wq, a[0]);
+	return 0;
+}
+
+/* file operation */
+static s32 amvenc_avc_open(struct inode *inode, struct file *file)
+{
+	struct encode_wq_s *wq;
+
+	file->private_data = NULL;
+	enc_pr(LOG_DEBUG, "avc open\n");
+	wq = avc_instance_open();
+	if (IS_ERR(wq))
+		return PTR_ERR(wq);
 	file->private_data = (void *) wq;
-	return r;
+	return 0;
 }
 
 static s32 amvenc_avc_release(struct inode *inode, struct file *file)
@@ -3803,45 +3983,10 @@ static long amvenc_avc_ioctl(struct file *file, u32 cmd, ulong arg)
 				"avc config init error, wq:%p.\n", (void *)wq);
 			return -1;
 		}
-		//wq->ucode_index = UCODE_MODE_FULL;
-		wq->ucode_index = addr_info[0];
-#ifdef MULTI_SLICE_MC
-		wq->pic.rows_per_slice = addr_info[1];
-		enc_pr(LOG_DEBUG,
-			"avc init -- rows_per_slice: %d, wq: %p.\n",
-			wq->pic.rows_per_slice, (void *)wq);
-#endif
-		enc_pr(LOG_DEBUG,
-			"avc init as mode %d, wq: %px.\n",
-			wq->ucode_index, (void *)wq);
-
-		if (is_oversize(addr_info[2],
-			addr_info[3],
-			wq->mem.bufspec.max_width * wq->mem.bufspec.max_height)) {
-			enc_pr(LOG_ERROR,
-				"avc config init- encode size %dx%d is larger than supported (%dx%d).  wq:%p.\n",
-				addr_info[2], addr_info[3],
-				wq->mem.bufspec.max_width,
-				wq->mem.bufspec.max_height, (void *)wq);
+		if (avc_instance_config(wq, addr_info[0], addr_info[1],
+					addr_info[2], addr_info[3],
+					addr_info[4]))
 			return -1;
-		}
-
-		wq->pic.encoder_width = addr_info[2];
-		wq->pic.encoder_height = addr_info[3];
-		enc_pr(LOG_INFO, "hwenc: AMVENC_AVC_IOC_CONFIG_INIT: w:%d, h:%d\n", wq->pic.encoder_width, wq->pic.encoder_height);
-
-		wq->pic.color_space = addr_info[4];
-		enc_pr(LOG_INFO, "hwenc: AMVENC_AVC_IOC_CONFIG_INIT, wq->pic.color_space=%#x\n", wq->pic.color_space);
-
-		/*
-		if (wq->pic.encoder_width *
-			wq->pic.encoder_height >= 1280 * 720)
-			clock_level = 6;
-		else
-			clock_level = 5;
-		*/
-		avc_buffspec_init(wq);
-		complete(&encode_manager.event.request_in_com);
 		addr_info[1] = wq->mem.bufspec.dct.buf_start;
 		addr_info[2] = wq->mem.bufspec.dct.buf_size;
 		addr_info[3] = wq->mem.bufspec.bitstream.buf_start;
@@ -3900,56 +4045,7 @@ static long amvenc_avc_ioctl(struct file *file, u32 cmd, ulong arg)
 		break;
 	case AMVENC_AVC_IOC_SUBMIT:
 		get_user(amrisc_cmd, ((u32 *)arg));
-		if (amrisc_cmd == ENCODER_IDR) {
-			wq->pic.idr_pic_id++;
-			if (wq->pic.idr_pic_id > 65535)
-				wq->pic.idr_pic_id = 0;
-			wq->pic.pic_order_cnt_lsb = 2;
-			wq->pic.frame_number = 1;
-		} else if (amrisc_cmd == ENCODER_NON_IDR) {
-#ifdef H264_ENC_SVC
-			/* only update when there is reference frame */
-			if (wq->pic.enable_svc == 0 || wq->pic.non_ref_cnt == 0) {
-				wq->pic.frame_number++;
-				enc_pr(LOG_INFO, "Increase frame_num to %d\n",
-					wq->pic.frame_number);
-			}
-#else
-			wq->pic.frame_number++;
-#endif
-
-			wq->pic.pic_order_cnt_lsb += 2;
-			if (wq->pic.frame_number > 65535)
-				wq->pic.frame_number = 0;
-		}
-#ifdef H264_ENC_SVC
-		/* only update when there is reference frame */
-		if (wq->pic.enable_svc == 0 || wq->pic.non_ref_cnt == 0) {
-			amrisc_cmd = wq->mem.dblk_buf_canvas;
-			wq->mem.dblk_buf_canvas = wq->mem.ref_buf_canvas;
-			/* current dblk buffer as next reference buffer */
-			wq->mem.ref_buf_canvas = amrisc_cmd;
-			enc_pr(LOG_INFO,
-				"switch buffer enable %d  cnt %d\n",
-				wq->pic.enable_svc, wq->pic.non_ref_cnt);
-		}
-		if (wq->pic.enable_svc) {
-			wq->pic.non_ref_cnt ++;
-			if (wq->pic.non_ref_cnt > wq->pic.non_ref_limit) {
-				enc_pr(LOG_INFO, "Svc clear cnt %d conf %d\n",
-					wq->pic.non_ref_cnt,
-					wq->pic.non_ref_limit);
-				wq->pic.non_ref_cnt = 0;
-			} else
-			enc_pr(LOG_INFO,"Svc increase non ref counter to %d\n",
-				wq->pic.non_ref_cnt );
-		}
-#else
-		amrisc_cmd = wq->mem.dblk_buf_canvas;
-		wq->mem.dblk_buf_canvas = wq->mem.ref_buf_canvas;
-		/* current dblk buffer as next reference buffer */
-		wq->mem.ref_buf_canvas = amrisc_cmd;
-#endif
+		avc_instance_submit(wq, amrisc_cmd);
 		break;
 	case AMVENC_AVC_IOC_READ_CANVAS:
 		get_user(argV, ((u32 *)arg));
@@ -4188,7 +4284,8 @@ Again:
 		}
 	}
 	atomic_inc(&wq->request_ready);
-	wake_up_interruptible(&wq->request_complete);
+	/* not _interruptible: avc_k_run() sleeps uninterruptibly */
+	wake_up(&wq->request_complete);
 	return ret;
 }
 
@@ -4979,6 +5076,8 @@ static s32 amvenc_avc_probe(struct platform_device *pdev)
 	}
 
 	r = init_avc_device();
+	if (!r && avc_v4l2_register(&pdev->dev))
+		enc_pr(LOG_ERROR, "V4L2 encoder registration failed\n");
 	enc_pr(LOG_INFO, "amvenc_avc probe end.\n");
 
 	return r;
@@ -4986,6 +5085,7 @@ static s32 amvenc_avc_probe(struct platform_device *pdev)
 
 static void amvenc_avc_remove(struct platform_device *pdev)
 {
+	avc_v4l2_unregister();
 	kfree(encode_manager.reserve_buff);
 	encode_manager.reserve_buff = NULL;
 	if (encode_wq_uninit())

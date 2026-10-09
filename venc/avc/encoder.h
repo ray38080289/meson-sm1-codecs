@@ -397,6 +397,15 @@ extern s32 encode_wq_add_request(struct encode_wq_s *wq);
 extern struct encode_wq_s *create_encode_work_queue(void);
 extern s32 destroy_encode_work_queue(struct encode_wq_s *encode_work_queue);
 
+/* in-kernel API (encoder.c) used by the V4L2 wrapper (venc_v4l2.c) */
+struct encode_wq_s *avc_k_open(u32 width, u32 height);
+void avc_k_close(struct encode_wq_s *wq);
+s32 avc_k_headers(struct encode_wq_s *wq, u32 qp, const u8 **data, u32 *len);
+s32 avc_k_frame(struct encode_wq_s *wq, bool idr, u32 fmt, u32 y, u32 uv,
+		u32 qp, const u8 **data, u32 *len);
+int avc_v4l2_register(struct device *dev);
+void avc_v4l2_unregister(void);
+
 /********************************************
  *  AV Scratch Register Re-Define
  ****************************************** *
