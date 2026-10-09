@@ -191,6 +191,7 @@ struct amvdec_ops {
  *		  for flush. Mutually exclusive with @drain, except for
  *		  @async_drain codecs: it is queued after the last input,
  *		  before @drain.
+ * @eos_queued: optional call after the @eos_sequence entered the VIFIFO
  * @isr: mandatory call when the ISR triggers
  * @threaded_isr: mandatory call for the threaded ISR
  */
@@ -223,6 +224,7 @@ struct amvdec_codec_ops {
 	void (*drain)(struct amvdec_session *sess);
 	int (*resume)(struct amvdec_session *sess);
 	const u8 * (*eos_sequence)(u32 *len);
+	void (*eos_queued)(struct amvdec_session *sess);
 	irqreturn_t (*isr)(struct amvdec_session *sess);
 	irqreturn_t (*threaded_isr)(struct amvdec_session *sess);
 };
@@ -290,6 +292,7 @@ enum amvdec_m2m_job_state {
  * @xfer_func: current transfer function
  * @pixelaspect: Pixel Aspect Ratio reported by the decoder
  * @esparser_queued_bufs: number of buffers currently queued into ESPARSER
+ * @es_frames: VP9 frames (superframe parts count each) written to the VIFIFO
  * @esparser_queue_work: work struct for the ESPARSER to process src buffers
  * @m2m_job_running: current state of this context in the m2m scheduler
  * @streamon_cap: stream on flag for capture queue
@@ -356,6 +359,7 @@ struct amvdec_session {
 	struct v4l2_fract pixelaspect;
 
 	atomic_t esparser_queued_bufs;
+	u32 es_frames;
 	struct work_struct esparser_queue_work;
 	atomic_t m2m_job_running;
 

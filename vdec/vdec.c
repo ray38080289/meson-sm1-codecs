@@ -420,6 +420,8 @@ static bool vdec_m2m_finish_drain(struct amvdec_session *sess)
 
 		/* push the last picture through, then let it decode */
 		esparser_queue_eos(sess->core, data, len);
+		if (codec_ops->eos_queued)
+			codec_ops->eos_queued(sess);
 		vdec_wait_inactive(sess);
 	}
 	if (codec_ops->drain) {
@@ -1237,6 +1239,8 @@ vdec_decoder_cmd(struct file *file, void *fh, struct v4l2_decoder_cmd *cmd)
 		const u8 *data = codec_ops->eos_sequence(&len);
 
 		esparser_queue_eos(sess->core, data, len);
+		if (codec_ops->eos_queued)
+			codec_ops->eos_queued(sess);
 		vdec_wait_inactive(sess);
 	}
 

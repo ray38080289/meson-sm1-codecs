@@ -75,7 +75,8 @@ static irqreturn_t esparser_isr(int irq, void *dev)
  * VP9 frame headers need to be appended by a 16-byte long
  * Amlogic custom header
  */
-static int vp9_update_header(struct amvdec_core *core, struct vb2_buffer *buf)
+static int vp9_update_header(struct amvdec_core *core, struct vb2_buffer *buf,
+			     u32 *frames)
 {
 	u8 *dp;
 	u8 marker;
@@ -178,6 +179,7 @@ static int vp9_update_header(struct amvdec_core *core, struct vb2_buffer *buf)
 		old_header = fdata;
 	}
 
+	*frames = num_frames;
 	return new_frame_size;
 }
 
@@ -306,6 +308,7 @@ esparser_queue_locked(struct amvdec_session *sess,
 	u32 payload_size = vb2_get_plane_payload(vb, 0);
 	dma_addr_t phy = vb2_dma_contig_plane_dma_addr(vb, 0);
 	u32 num_dst_bufs = 0;
+	u32 vp9_frames = 0;
 	u32 offset;
 	u32 pad_size;
 	if (codec_ops->can_queue_input &&
@@ -369,7 +372,7 @@ esparser_queue_locked(struct amvdec_session *sess,
 	vbuf->sequence = sess->sequence_out++;
 
 	if (sess->fmt_out->pixfmt == V4L2_PIX_FMT_VP9) {
-		payload_size = vp9_update_header(core, vb);
+		payload_size = vp9_update_header(core, vb, &vp9_frames);
 
 		/* If unable to alter buffer to add headers */
 		if (payload_size == 0) {
@@ -406,6 +409,8 @@ esparser_queue_locked(struct amvdec_session *sess,
 	}
 
 	atomic_inc(&sess->esparser_queued_bufs);
+	/* before input_queued(), which may decode a frame waiting for this */
+	WRITE_ONCE(sess->es_frames, sess->es_frames + vp9_frames);
 	*input_queued = true;
 	*queued_payload_size = payload_size;
 	*queued_parser_size = payload_size + pad_size;

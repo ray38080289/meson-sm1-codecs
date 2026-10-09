@@ -458,6 +458,11 @@ struct codec_vp9 {
 	struct list_head ref_frames_list;
 	u32 frames_num;
 
+	/* Frame headers parsed, against sess->es_frames written */
+	u32 headers;
+	/* The current frame waits for the next one to be in the VIFIFO */
+	bool decode_deferred;
+
 	/* In case of downsampling (decoding with FBC but outputting in NV12M),
 	 * we need to allocate additional buffers for FBC.
 	 */
@@ -793,6 +798,7 @@ static int codec_vp9_start(struct amvdec_session *sess)
 	vp9 = kzalloc(sizeof(*vp9), GFP_KERNEL);
 	if (!vp9)
 		return -ENOMEM;
+	sess->es_frames = 0;
 
 	ret = codec_vp9_alloc_workspace(core, vp9);
 	if (ret)
@@ -1296,6 +1302,59 @@ static void codec_vp9_rm_noshow_frame(struct amvdec_session *sess)
 	}
 }
 
+/*
+ * Ask the ucode to decode the current frame, after which it searches the
+ * VIFIFO for the next frame header. The stream fetch reads ahead: searching
+ * right at the end of what has been written, it can take in stale bytes
+ * where the next packet is about to land, miss that header and skip the
+ * frame (one in a few runs under memory load). So the last written frame
+ * waits until the next one, or the EOS padding, is in the VIFIFO.
+ * Called with vp9->lock held.
+ */
+static void codec_vp9_decode(struct amvdec_session *sess)
+{
+	struct codec_vp9 *vp9 = sess->priv;
+
+	if (!sess->should_stop &&
+	    (s32)(READ_ONCE(sess->es_frames) - vp9->headers) <= 0) {
+		vp9->decode_deferred = true;
+		return;
+	}
+
+	vp9->decode_deferred = false;
+	amvdec_write_dos(sess->core, VP9_DEC_STATUS_REG, VP9_10B_DECODE_SLICE);
+}
+
+static void codec_vp9_input_queued(struct amvdec_session *sess,
+				   u32 payload_size)
+{
+	struct codec_vp9 *vp9 = sess->priv;
+
+	if (!vp9)
+		return;
+
+	mutex_lock(&vp9->lock);
+	if (vp9->decode_deferred)
+		codec_vp9_decode(sess);
+	mutex_unlock(&vp9->lock);
+}
+
+static void codec_vp9_eos_queued(struct amvdec_session *sess)
+{
+	struct codec_vp9 *vp9 = sess->priv;
+
+	if (!vp9)
+		return;
+
+	mutex_lock(&vp9->lock);
+	if (vp9->decode_deferred) {
+		/* the core then waits for this decode to go idle */
+		sess->last_irq_jiffies = get_jiffies_64();
+		codec_vp9_decode(sess);
+	}
+	mutex_unlock(&vp9->lock);
+}
+
 static void codec_vp9_process_frame(struct amvdec_session *sess)
 {
 	struct amvdec_core *core = sess->core;
@@ -1351,8 +1410,7 @@ static void codec_vp9_process_frame(struct amvdec_session *sess)
 				   &vp9->lfi, &vp9->lf,
 				   vp9->default_filt_lvl);
 
-	/* ask uCode to start decoding */
-	amvdec_write_dos(core, VP9_DEC_STATUS_REG, VP9_10B_DECODE_SLICE);
+	codec_vp9_decode(sess);
 }
 
 static void codec_vp9_process_lf(struct codec_vp9 *vp9)
@@ -2167,6 +2225,7 @@ static irqreturn_t codec_vp9_threaded_isr(struct amvdec_session *sess)
 
 	pr_debug("ISR: %08X;%08X\n", dec_status, prob_status);
 	sess->keyframe_found = 1;
+	vp9->headers++;
 
 	if ((prob_status & 0xff) == 0xfd && vp9->cur_frame) {
 		/* VP9_REQ_ADAPT_PROB */
@@ -2244,5 +2303,7 @@ struct amvdec_codec_ops codec_vp9_ops = {
 	.async_drain = true,
 	.drain = codec_vp9_drain,
 	.eos_sequence = codec_vp9_eos_sequence,
+	.eos_queued = codec_vp9_eos_queued,
+	.input_queued = codec_vp9_input_queued,
 	.resume = codec_vp9_resume,
 };
