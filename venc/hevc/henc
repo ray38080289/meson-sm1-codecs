@@ -1,0 +1,65 @@
+#!/bin/sh
+# henc: H.265/HEVC hardware encode on the S905X3 WAVE420L (amvenc_hevc).
+# Raw frames on stdin, HEVC Annex-B on stdout -- same interface as venc.
+#   henc -s WxH [-f nv12|nv21|i420] [-q QP | -b KBPS] [-r FPS] [-g GOP] [-n FRAMES]
+# Wraps the Chips&Media sample (w4_enc_test): it reads its config/firmware
+# from its own directory and treats any stdin byte as "stop", so input and
+# output go through FIFOs and its own stdin is /dev/null.
+set -e
+LIB=${HENC_LIB:-/usr/local/lib/henc}
+usage() {
+	echo "usage: henc -s WxH [-f nv12|nv21|i420] [-q QP | -b KBPS] [-r FPS] [-g GOP] [-n FRAMES]" >&2
+	echo "  raw frames on stdin, HEVC Annex-B on stdout" >&2
+	echo "  -q  fixed QP 0..51 (default 30)   -b  target bitrate in kbit/s (rate control)" >&2
+	echo "  -r  frame rate (default 30)       -g  IDR interval (default 60, 0 = first only)" >&2
+	echo "  -n  frames to encode (default: until EOF)" >&2
+	exit 2
+}
+
+size= fmt=nv12 qp=30 kbps=0 fps=30 gop=60 frames=2147483647
+while getopts s:f:q:b:r:g:n:h o; do
+	case $o in
+	s) size=$OPTARG ;; f) fmt=$OPTARG ;; q) qp=$OPTARG ;; b) kbps=$OPTARG ;;
+	r) fps=$OPTARG ;; g) gop=$OPTARG ;; n) frames=$OPTARG ;; *) usage ;;
+	esac
+done
+w=${size%x*}; h=${size#*x}
+case "$w$h" in ''|*[!0-9]*) usage ;; esac
+
+case $fmt in
+nv12) fmtopt="--enable-cbcrInterleave" ;;
+nv21) fmtopt="--enable-cbcrInterleave --nv21 1" ;;
+i420) fmtopt="" ;;
+*) usage ;;
+esac
+
+tmp=$(mktemp -d /tmp/henc.XXXXXX)
+# the FIFO helpers block in open() if w4_enc_test fails before opening them
+pids=
+trap 'kill $pids 2>/dev/null || :; rm -rf "$tmp"' EXIT
+mkfifo "$tmp/in" "$tmp/out"
+
+rc=0; [ "$kbps" -gt 0 ] && rc=1
+sed -e "s/^SourceWidth .*/SourceWidth : $w/" \
+    -e "s/^SourceHeight .*/SourceHeight : $h/" \
+    -e "s/^FramesToBeEncoded .*/FramesToBeEncoded : $frames/" \
+    -e "s/^FrameRate .*/FrameRate : $fps/" \
+    -e "s/^IntraPeriod .*/IntraPeriod : $gop/" \
+    -e "s/^QP .*/QP : $qp/" \
+    -e "s/^RateControl .*/RateControl : $rc/" \
+    -e "s/^EncBitrate .*/EncBitrate : $((kbps * 1000))/" \
+    -e "s|^InputFile .*|InputFile : $tmp/in|" \
+    -e "s|^BitstreamFile .*|BitstreamFile : $tmp/out|" \
+    "$LIB/template.cfg" > "$tmp/enc.cfg"
+
+exec 3<&0
+cat <&3 > "$tmp/in" &
+pids=$!
+cat "$tmp/out" &
+pids="$pids $!"
+cd "$LIB"
+./w4_enc_test --codec 12 --cfgFileName "$tmp/enc.cfg" --input "$tmp/in" \
+	--output "$tmp/out" --picWidth "$w" --picHeight "$h" $fmtopt \
+	< /dev/null > "$tmp/log" 2>&1 || { tail -5 "$tmp/log" >&2; exit 1; }
+wait
+grep -o "Tot Frame [0-9]*" "$tmp/log" | tail -1 | sed "s/^/henc: /" >&2
