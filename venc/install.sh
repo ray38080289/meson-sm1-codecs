@@ -14,15 +14,17 @@ install -Dm644 /tmp/amvenc_avc.ko "/lib/modules/$K/updates/amvenc_avc.ko"
 install -Dm644 /tmp/amvenc_hevc.ko "/lib/modules/$K/updates/amvenc_hevc.ko"
 install -Dm644 /tmp/meson-vdec.ko "/lib/modules/$K/updates/meson-vdec.ko"
 
+# decoder and encoder firmware, from its public upstreams, md5-checked
+python3 "$(dirname "$0")/../get-firmware.py"
+
 # H.264 (HCodec)
-install -Dm644 "$SRC/venc/ga_h264_enc_cabac.bin" /lib/firmware/meson/venc/ga_h264_enc_cabac.bin
 install -Dm755 "$SRC/venc/avc/venc" /usr/local/bin/venc
 
-# H.265 (WAVE420L): Chips&Media sample + firmware (monet.bin, C&M binary
-# licence: redistribution with the copyright notice) + config template
+# H.265 (WAVE420L): Chips&Media sample (reads monet.bin from its own
+# directory) + config template
 install -Dm755 "$SRC/w420/code/w4_enc_test" /usr/local/lib/henc/w4_enc_test
-install -Dm644 "$SRC/w420/code/monet.bin" /usr/local/lib/henc/monet.bin
-install -Dm644 "$SRC/w420/firmware/LICENSE.txt" /usr/local/lib/henc/LICENSE.monet.txt
+install -Dm644 /lib/firmware/meson/venc/monet.bin /usr/local/lib/henc/monet.bin
+install -Dm644 /lib/firmware/meson/venc/LICENSE.monet.txt /usr/local/lib/henc/LICENSE.monet.txt
 install -Dm644 "$SRC/w420/code/cfg/encoder_defconfig.cfg" /usr/local/lib/henc/template.cfg
 install -Dm755 "$SRC/henc/henc" /usr/local/bin/henc
 
