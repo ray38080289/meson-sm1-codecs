@@ -115,6 +115,10 @@ and build with `make KDIR=<that copy>`.
 streams once and compare hardware decoding against FFmpeg's software decoder
 (frame counts and PSNR, `inf` = bit-exact).
 
+Development notes (build/test workflow, debugging, hardware pitfalls) are in
+[`.claude/skills/meson-sm1-codecs/SKILL.md`](.claude/skills/meson-sm1-codecs/SKILL.md),
+which Claude Code also loads as a skill.
+
 ## AI-generated
 
 All work in this repository on top of the imported code is 100%
